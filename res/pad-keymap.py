@@ -304,6 +304,7 @@ def run(pad, index, profile, grab):
     lx = ly = rx = ry = 0.0
     last_scroll = 0.0
     hat_x = hat_y = 0
+    manual = False      # right stick has taken the cursor; hold position until the left moves
     pending = {}        # chord buttons held but not yet emitted
     emitted = set()     # chord buttons whose key was sent (held down)
     chord_fired = False
@@ -402,8 +403,30 @@ def run(pad, index, profile, grab):
                         emitted.add(code)
                     pending.pop(code, None)
 
+        # RIGHT STICK = free mouse, for menus.
+        #
+        # "direction" mode tethers the cursor to a fixed radius around the character, which is
+        # right for combat and useless for an inventory screen - you cannot reach a slot in the
+        # corner. The right stick moves the cursor freely and it STAYS where you leave it, so
+        # menus work like a mouse. Pushing the left stick returns control to combat targeting.
+        if rx or ry:
+            dx = int(round(rx * CURSOR_MAX_SPEED))
+            dy = int(round(ry * CURSOR_MAX_SPEED))
+            if dx or dy:
+                if dx: mouse.write(e.EV_REL, e.REL_X, dx)
+                if dy: mouse.write(e.EV_REL, e.REL_Y, dy)
+                mouse.syn()
+                est_x = min(max(est_x + dx, 0.0), float(screen_w))
+                est_y = min(max(est_y + dy, 0.0), float(screen_h))
+            manual = True
+        elif lx or ly:
+            # Left stick reasserts combat targeting.
+            manual = False
+
         # Cursor motion from the left stick.
-        if mode == "direction":
+        if manual:
+            pass          # hold position; the right stick is in charge
+        elif mode == "direction":
             # Where the cursor SHOULD be: centre plus the stick's deflection scaled to radius.
             # Only relative motion can be emitted, so the cursor position is tracked by dead
             # reckoning from an assumed centred start and clamped to the screen. Small drift is
@@ -433,13 +456,9 @@ def run(pad, index, profile, grab):
             if dy: mouse.write(e.EV_REL, e.REL_Y, dy)
             mouse.syn()
 
-        # Right stick scrolls (zoom in these games), rate-limited so one nudge is one click.
-        if ry:
-            now = time.monotonic()
-            if now - last_scroll >= SCROLL_INTERVAL:
-                mouse.write(e.EV_REL, e.REL_WHEEL, -1 if ry > 0 else 1)
-                mouse.syn()
-                last_scroll = now
+        # NOTE: the right stick used to emit scroll-wheel clicks (zoom). Menu navigation needs
+        # a free cursor far more than the games need stick zoom, so the stick now moves the
+        # pointer instead. Zoom is still available on the mouse wheel itself.
 
 
 def main():
