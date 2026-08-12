@@ -100,9 +100,19 @@ PROFILES = {
 #             right and holding A walks right - which is how console ARPG ports handle exactly
 #             this problem. Radius is in pixels from centre: far enough to be outside the
 #             character, close enough that enemies near you are under the cursor.
+# TESTED IN PLAY AND REVERTED TO "pointer" (2026-08-12).
+#
+# "direction" is how console ARPG ports solve click-to-move, and it works exactly as designed -
+# but in the hand it felt broken rather than helpful: the cursor "always returns to the same
+# coordinates and only goes so far in any direction", which is the tether doing its job and
+# reading as a stuck cursor. The free mouse on the right stick was the part that felt right, so
+# both sticks are free pointers now.
+#
+# The direction code is kept and still selectable with --cursor-mode direction, because the
+# idea is sound and a smaller radius or a hold-to-tether button might yet be the answer.
 CURSOR_MODES = {
-    "torchlight2": ("direction", 230),
-    "nwn":         ("direction", 260),
+    "torchlight2": ("pointer", 0),
+    "nwn":         ("pointer", 0),
     "generic":     ("pointer", 0),
 }
 
