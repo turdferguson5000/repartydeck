@@ -116,10 +116,13 @@ DPAD = {
 # emits small relative movements at a fixed rate. A deadzone is essential - analogue sticks
 # rest a few units off centre and the cursor would otherwise drift forever.
 DEADZONE = 6000        # of 32767
-# Pixels per tick at full deflection. 22 was the original value and proved far too fast in
-# play - a small stick nudge threw the cursor across the screen. 9 is that reduced by ~60%.
-# Override per run with --cursor-speed.
-CURSOR_MAX_SPEED = 9
+# How fast the cursor travels, in pixels per tick (~125 ticks/sec).
+#
+# 22 was the original and proved far too fast - a small stick nudge threw the cursor across the
+# screen. 9 was that reduced ~60%, and still too quick in play. 6.3 is a further 30% off.
+# In "direction" mode this governs how quickly the cursor eases out to its parked position and
+# back, NOT how far it parks - that is the per-profile radius. Override with --cursor-speed.
+CURSOR_MAX_SPEED = 6.3
 TICK = 0.008           # ~125 Hz, matches a typical mouse polling rate
 PRINT_NODE = False   # set from --print-node; makes stdout machine-readable
 CURSOR_MODE_OVERRIDE = ""   # --cursor-mode
