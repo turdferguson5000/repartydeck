@@ -110,9 +110,19 @@ PROFILES = {
 #
 # The direction code is kept and still selectable with --cursor-mode direction, because the
 # idea is sound and a smaller radius or a hold-to-tether button might yet be the answer.
+# ALL "pointer" - the only scheme confirmed working in play.
+#
+# "region" (Steam Input's absolute mouse-region idea) was tried and failed on this stack: the
+# game's own cursor sat near screen centre and did not follow, and movement collapsed to about
+# eight directions. Region mode moves the cursor in ONE large delta per tick, and something in
+# the gamescope/OpenGL path does not survive that - whereas the small continuous deltas that
+# "pointer" emits demonstrably do, which is why the right stick always felt right.
+#
+# Both modes are kept and selectable (--cursor-mode region|direction), but neither should be a
+# default again without being played first.
 CURSOR_MODES = {
-    "torchlight2": ("region", 420),
-    "nwn":         ("region", 420),
+    "torchlight2": ("pointer", 0),
+    "nwn":         ("pointer", 0),
     "generic":     ("pointer", 0),
 }
 
