@@ -35,6 +35,98 @@ fn main() -> eframe::Result {
     }
 
     let args: Vec<String> = std::env::args().collect();
+    // --dry-run-launch <handler-dir> <pad1[,pad2...]>
+    //
+    // A testable seam for the whole launch pipeline. It builds the REAL commands - handler
+    // parsing, pad-keymap spawning, gamescope arguments, bwrap device masking - and prints
+    // them as JSON instead of starting any games. Everything downstream of this point is
+    // rendering; everything upstream is logic that used to be verifiable only by launching a
+    // game and watching it fail.
+    if let Some(pos) = std::env::args().position(|a| a == "--dry-run-launch") {
+        let argv: Vec<String> = std::env::args().collect();
+        let handler_dir = argv.get(pos + 1).cloned().unwrap_or_default();
+        let pad_list = argv.get(pos + 2).cloned().unwrap_or_default();
+
+        let hpath = paths::PATH_PARTY.join("handlers").join(&handler_dir).join("handler.json");
+        let mut h = match handler::Handler::from_json(&hpath) {
+            Ok(h) => h,
+            Err(e) => { eprintln!("dry-run: cannot load {}: {e}", hpath.display()); std::process::exit(2); }
+        };
+        h.path_handler = paths::PATH_PARTY.join("handlers").join(&handler_dir);
+
+        let scanned = input::scan_input_devices(&app::PadFilterType::All);
+        let devices: Vec<input::DeviceInfo> = scanned.iter().map(|d| d.info()).collect();
+        let wanted: Vec<&str> = pad_list.split(',').filter(|s| !s.is_empty()).collect();
+        let mut instances: Vec<instance::Instance> = Vec::new();
+        for (i, want) in wanted.iter().enumerate() {
+            let Some(idx) = devices.iter().position(|d| d.path == *want) else {
+                eprintln!("dry-run: no such device {want}");
+                std::process::exit(2);
+            };
+            instances.push(instance::Instance {
+                devices: vec![idx],
+                profname: format!("Player{}", i + 1),
+                profselection: 0,
+                monitor: 0,
+                audio_sink: String::new(),
+                width: 1920,
+                height: 1080,
+                res_override: None,
+            });
+        }
+
+        let cfg = app::load_cfg();
+
+        // The real flow creates each profile's gamesave dir before mounting - that dir is the
+        // overlay's upperdir, and fuse-overlayfs fails outright without it.
+        if let Err(e) = launch::setup_profiles(&h, &instances) {
+            eprintln!("dry-run: setup_profiles failed: {e}");
+            launch::stop_pad_keymaps();
+            std::process::exit(3);
+        }
+
+        // The real flow mounts the per-instance overlays before building commands, and
+        // launch_cmds validates the executable inside that merged view. Mount them here too,
+        // or the dry run tests a path the real launch never takes.
+        if let Err(e) = launch::fuse_overlayfs_mount_gamedirs(&h, &instances) {
+            eprintln!("dry-run: overlay mount failed: {e}");
+            launch::stop_pad_keymaps();
+            std::process::exit(3);
+        }
+
+        match launch::launch_cmds(&h, &devices, &instances, &cfg) {
+            Ok(cmds) => {
+                println!("[");
+                for (n, c) in cmds.iter().enumerate() {
+                    let mut parts: Vec<String> = vec![c.get_program().to_string_lossy().to_string()];
+                    for a in c.get_args() {
+                        parts.push(a.to_string_lossy().to_string());
+                    }
+                    let esc: Vec<String> = parts
+                        .iter()
+                        .map(|p| format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\"")))
+                        .collect();
+                    println!("  [{}]{}", esc.join(", "), if n + 1 < cmds.len() { "," } else { "" });
+                }
+                println!("]");
+            }
+            Err(e) => {
+                eprintln!("dry-run: launch_cmds failed: {e}");
+                // Release the pads on THIS path too. Missing that leaves mappers running,
+                // and because they inherit stdout the caller's pipe never sees EOF - a test
+                // harness reading our output just hangs until its timeout.
+                launch::stop_pad_keymaps();
+                let _ = util::fuse_overlayfs_unmount_gamedirs();
+                std::process::exit(1);
+            }
+        }
+        // Release the pads: the mappers were really started, and a dry run must not leave
+        // them holding controllers.
+        launch::stop_pad_keymaps();
+        let _ = util::fuse_overlayfs_unmount_gamedirs();
+        std::process::exit(0);
+    }
+
 
     if std::env::args().any(|arg| arg == "--kwin") {
         let args: Vec<String> = std::env::args().filter(|arg| arg != "--kwin").collect();

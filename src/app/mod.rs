@@ -4,5 +4,6 @@ mod app_panels;
 mod config;
 
 pub use app::PartyApp;
+pub use config::load_cfg;
 pub use config::PadFilterType;
 pub use config::PartyConfig;

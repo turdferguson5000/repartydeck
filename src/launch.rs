@@ -197,6 +197,9 @@ pub fn launch_cmds(
                     "--print-node",
                 ])
                 .stdout(std::process::Stdio::piped())
+                // Inheriting stderr would keep the parent's pipe open after we exit, so a
+                // caller reading our output waits for EOF that never comes.
+                .stderr(std::process::Stdio::null())
                 .spawn();
             match out {
                 Ok(mut child) => {
