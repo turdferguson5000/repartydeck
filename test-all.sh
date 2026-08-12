@@ -7,7 +7,7 @@
 set -u
 cd "$(dirname "$0")"
 rc=0
-for t in test-pad-keymap.py test-pad-keymap-edge.py test-partydeck-flow.py; do
+for t in test-pad-keymap.py test-pad-keymap-edge.py test-partydeck-flow.py test-lastmile.py; do
     echo "───────────────────────────────────────────────  $t"
     python3 "./$t" "$@" || rc=1
 done
