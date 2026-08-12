@@ -1,6 +1,6 @@
 // Loaded by PartyDeck. Two tokens are replaced at launch:
-//   PARTYDECK_ASSIGNMENTS      -> array mapping instance index -> screen index,
-//                                 e.g. [0, 1].
+//   PARTYDECK_ASSIGNMENTS      -> array mapping instance index -> screen NAME,
+//                                 e.g. ["HDMI-A-1", "DP-3"].
 //   PARTYDECK_USE_ASSIGNMENTS  -> true  : place each instance on its assigned
 //                                         screen (multi-monitor);
 //                                 false : classic splitscreen — ignore
@@ -25,12 +25,30 @@ function gamescopeClients() {
   return out;
 }
 
-// The screen index a given client should live on. Multi-monitor mode honors the
-// baked-in per-instance assignment; classic mode uses the screen KWin already
-// placed the window on (so it just splits the current screen).
+// A phantom output (simpledrm's "Unknown-N"/"None-N" EFI framebuffer connector) is a
+// screen KWin believes in but no display is attached to. PartyDeck filters it from its own
+// monitor list, but KWin still reports it here, so never fall back onto one.
+function isPhantom(name) {
+  const n = (name || "").toLowerCase();
+  return n.indexOf("unknown") === 0 || n.indexOf("none-") === 0;
+}
+
+// The screen a given client should live on, resolved by NAME. Indices are unusable as an
+// interchange: PartyDeck, KWin and SDL each enumerate monitors in a different order, and
+// KWin's list additionally includes phantom outputs. Multi-monitor mode matches the baked-in
+// per-instance monitor name; classic mode uses whatever screen KWin already chose.
 function screenIndexFor(clients, i, screens) {
   if (useAssignments) {
-    return i < assignments.length ? assignments[i] : 0;
+    const want = i < assignments.length ? assignments[i] : "";
+    for (let s = 0; s < screens.length; s++) {
+      if (screens[s] && screens[s].name === want) return s;
+    }
+    // Named screen is gone (unplugged, or renamed since launch): use the first real one
+    // rather than index 0, which could be the phantom.
+    for (let s = 0; s < screens.length; s++) {
+      if (screens[s] && !isPhantom(screens[s].name)) return s;
+    }
+    return 0;
   }
   const out = clients[i].output;
   for (let s = 0; s < screens.length; s++) {

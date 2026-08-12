@@ -3,6 +3,7 @@ mod handler;
 mod input;
 mod instance;
 mod launch;
+mod layout;
 mod monitor;
 mod paths;
 mod profiles;
@@ -129,8 +130,12 @@ fn main() -> eframe::Result {
 
     println!("[partydeck] Starting eframe app...");
 
+    // Local build carrying fixes that are not in any upstream release (name-based monitor
+    // assignment, phantom-output filtering, remembered per-handler layouts, no launch
+    // timeout). The title says so, and the version is deliberately absurd, because an
+    // upstream "update" would silently replace all of it.
     eframe::run_native(
-        "PartyDeck",
+        "PartyDeck [tim custom dont update]",
         options,
         Box::new(|cc| {
             // This gives us image support:

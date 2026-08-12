@@ -49,7 +49,25 @@ pub fn launch_game(
         // place each gamescope window on its assigned screen (the SDL backend's
         // --display-index doesn't apply on the Wayland backend). PARTYDECK_USE_
         // ASSIGNMENTS selects multi-monitor placement vs classic splitscreen.
-        let assignments: Vec<String> = instances.iter().map(|i| i.monitor.to_string()).collect();
+        // Assignments travel as monitor NAMES, not indices.
+        //
+        // Three components enumerate monitors and none of them agree on order: PartyDeck
+        // reads X11/RandR and sorts the primary first (monitor.rs deliberately mimics SDL);
+        // KWin's `workspace.screens` uses its own order; and KWin also counts outputs
+        // PartyDeck does not list, such as the phantom simpledrm connector filtered out in
+        // monitor.rs. Index N in one list is therefore routinely a different physical screen
+        // in another, which silently placed windows on the wrong monitor.
+        //
+        // Names ("HDMI-A-1", "DP-3") are the one identifier all three agree on, so the script
+        // matches on `screen.name` and ordering stops mattering entirely.
+        let monitors = crate::monitor::get_monitors_errorless();
+        let assignments: Vec<String> = instances
+            .iter()
+            .map(|i| {
+                let name = monitors.get(i.monitor).map(|m| m.name()).unwrap_or("");
+                format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))
+            })
+            .collect();
         let template = std::fs::read_to_string(PATH_RES.join(script))
             .map_err(|e| format!("Failed to read KWin script: {}", e))?;
         let generated = template

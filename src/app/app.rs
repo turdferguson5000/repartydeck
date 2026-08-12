@@ -44,6 +44,9 @@ pub struct PartyApp {
     pub instances: Vec<Instance>,
     pub instance_add_dev: Option<usize>,
     pub profiles: Vec<String>,
+    /// Per-slot profile+monitor remembered from this handler's last launch.
+    /// Indexed by player slot, never by controller identity (see layout.rs).
+    pub remembered_layout: Vec<crate::layout::SlotLayout>,
 
     pub handlers: Vec<Handler>,
     pub selected_handler: usize,
@@ -51,6 +54,12 @@ pub struct PartyApp {
     pub handler_lite: Option<Handler>,
 
     pub loading_msg: Option<String>,
+
+    /// Message a task started with, kept so the elapsed-time line can be appended
+
+    /// without compounding every frame.
+
+    pub loading_base_msg: Option<String>,
     pub loading_since: Option<std::time::Instant>,
     #[allow(dead_code)]
     pub task: Option<std::thread::JoinHandle<()>>,
@@ -86,6 +95,7 @@ impl PartyApp {
             audio_sinks: get_audio_sinks(),
             input_devices,
             instances: Vec::new(),
+            remembered_layout: Vec::new(),
             instance_add_dev: None,
             handlers,
             selected_handler: 0,
@@ -93,6 +103,7 @@ impl PartyApp {
             handler_lite,
             profiles: scan_profiles(false),
             loading_msg: None,
+            loading_base_msg: None,
             loading_since: None,
             task: None,
         };
@@ -174,14 +185,33 @@ impl eframe::App for PartyApp {
                 let _ = handle.join();
                 self.loading_since = None;
                 self.loading_msg = None;
+                self.loading_base_msg = None;
             } else {
                 self.task = Some(handle);
             }
         }
         if let Some(start) = self.loading_since {
-            if start.elapsed() > std::time::Duration::from_secs(60) {
-                // Give up waiting after one minute
-                self.loading_msg = Some("Operation timed out".to_string());
+            // Never abandon a launch on a timer - keep polling until the task actually
+            // finishes (the is_finished() check above clears this).
+            //
+            // The old behaviour gave up after a flat 60s and printed "Operation timed out",
+            // which was both wrong and alarming: instances are started deliberately
+            // staggered by the handler's pause_between_starts (30s for Core Keeper and
+            // Orcs Must Die 3), so four players take 90s in deliberate waiting alone,
+            // before any game has loaded. Big Unreal titles building a Proton prefix on
+            // first run take minutes more. Nothing was actually cancelled - only the
+            // message changed - so the launch carried on while the UI claimed failure.
+            let secs = start.elapsed().as_secs();
+            if secs > 20 {
+                let base = self
+                    .loading_base_msg
+                    .clone()
+                    .unwrap_or_else(|| "Launching...".to_string());
+                self.loading_msg = Some(format!(
+                    "{base}\n\nStill working - {}m {:02}s elapsed.\nLarge games and first-run Proton prefixes can take several minutes.",
+                    secs / 60,
+                    secs % 60
+                ));
             }
         }
         if let Some(msg) = &self.loading_msg {
@@ -214,6 +244,7 @@ impl PartyApp {
         F: FnOnce() + Send + 'static,
     {
         self.loading_msg = Some(msg.to_string());
+        self.loading_base_msg = Some(msg.to_string());
         self.loading_since = Some(std::time::Instant::now());
         self.task = Some(std::thread::spawn(f));
     }
@@ -248,6 +279,7 @@ impl PartyApp {
                         self.instances.clear();
                         self.profiles = scan_profiles(true);
                         self.instance_add_dev = None;
+                        self.remembered_layout = crate::layout::load(&cur_handler!(self).name);
                         self.cur_page = MenuPage::Instances;
                     }
                 }
@@ -313,14 +345,29 @@ impl PartyApp {
                             // (instance 0 -> monitor 0, instance 1 -> monitor 1,
                             // ...), capped to the available monitors. Still
                             // overridable per-instance via the 🖵 dropdown.
-                            let mon = self
-                                .instances
-                                .len()
-                                .min(self.monitors.len().saturating_sub(1));
+                            // Replay what this handler used last time for this SLOT.
+                            // Slot order is the identity - first pad to join is player 1 -
+                            // so nothing about the physical controller is consulted.
+                            let slot = self.instances.len();
+                            let remembered = self.remembered_layout.get(slot).cloned();
+
+                            let mon = match &remembered {
+                                Some(r) if r.monitor < self.monitors.len() => r.monitor,
+                                _ => self
+                                    .instances
+                                    .len()
+                                    .min(self.monitors.len().saturating_sub(1)),
+                            };
+                            // A remembered profile that has since been deleted falls back
+                            // to the default rather than selecting the wrong person.
+                            let profsel = remembered
+                                .as_ref()
+                                .and_then(|r| self.profiles.iter().position(|p| *p == r.profname))
+                                .unwrap_or(0);
                             self.instances.push(Instance {
                                 devices: vec![i],
                                 profname: String::new(),
-                                profselection: 0,
+                                profselection: profsel,
                                 monitor: mon,
                                 audio_sink: String::new(),
                                 width: 0,
@@ -424,6 +471,28 @@ impl PartyApp {
         // (Single-monitor setups simply have every instance on monitor 0.)
         set_instance_resolutions_multimonitor(&mut self.instances, &self.monitors, &self.options);
         set_instance_names(&mut self.instances, &self.profiles);
+
+        // Remember this seating for next time: profile + monitor per slot, keyed by handler.
+        {
+            let hname = match &self.handler_lite {
+                Some(h) => h.name.clone(),
+                None => cur_handler!(self).name.clone(),
+            };
+            let slots: Vec<crate::layout::SlotLayout> = self
+                .instances
+                .iter()
+                .map(|inst| crate::layout::SlotLayout {
+                    profname: self
+                        .profiles
+                        .get(inst.profselection)
+                        .cloned()
+                        .unwrap_or_default(),
+                    monitor: inst.monitor,
+                })
+                .collect();
+            crate::layout::save(&hname, &slots);
+            self.remembered_layout = slots;
+        }
 
         let handler = if let Some(h) = self.handler_lite.clone() {
             h

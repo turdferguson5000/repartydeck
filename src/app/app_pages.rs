@@ -338,6 +338,9 @@ impl PartyApp {
                     self.audio_sinks = get_audio_sinks();
                     self.profiles = scan_profiles(true);
                     self.instance_add_dev = None;
+                    // Load this handler's remembered seating before any pad joins, so the
+                    // first instance created can already pick up slot 0's settings.
+                    self.remembered_layout = crate::layout::load(&h.name);
                     self.cur_page = MenuPage::Instances;
                 }
             }
