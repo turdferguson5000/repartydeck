@@ -106,7 +106,52 @@ pub fn launch_game(
         handle.wait()?;
     }
 
+    // Release the pads. Do this before returning the result so it happens whether the session
+    // ended cleanly or not.
+    stop_pad_keymaps();
+
     Ok(())
+}
+
+
+/// Mapper processes started for the current session.
+///
+/// These hold an EXCLUSIVE grab on each player's pad, which is correct while a game runs and
+/// actively harmful once it stops: a leftover mapper makes the pad unreadable, so PartyDeck
+/// cannot even see a button press to assign a controller. Anything started at launch has to be
+/// stopped at exit, so every child is tracked here and killed when the session ends.
+static KEYMAP_CHILDREN: std::sync::LazyLock<std::sync::Mutex<Vec<std::process::Child>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// Kill this session's mappers and release the pads.
+pub fn stop_pad_keymaps() {
+    let Ok(mut kids) = KEYMAP_CHILDREN.lock() else { return };
+    for child in kids.iter_mut() {
+        let _ = child.kill();
+        let _ = child.wait(); // reap, so we do not leave zombies behind
+    }
+    if !kids.is_empty() {
+        println!("[partydeck] pad-keymap: stopped {} mapper(s)", kids.len());
+    }
+    kids.clear();
+}
+
+/// Kill mappers orphaned by an earlier run (a crash, or a launch that failed part-way).
+///
+/// Without this, one failed launch leaves the pads grabbed forever and the next session cannot
+/// assign controllers at all - which looks like "the controller appears then disappears".
+fn sweep_orphan_pad_keymaps() {
+    let out = Command::new("pkill")
+        // Leading slash matters: a bare "pad-keymap.py" pattern also matches
+        // test-pad-keymap.py (and any shell whose command line mentions it), which is
+        // how an earlier version killed the test harness and its own caller.
+        .args(["-f", "/pad-keymap\\.py"])
+        .status();
+    if let Ok(st) = out {
+        if st.success() {
+            println!("[partydeck] pad-keymap: cleared orphaned mapper(s) from a previous run");
+        }
+    }
 }
 
 pub fn launch_cmds(
@@ -116,6 +161,98 @@ pub fn launch_cmds(
     cfg: &PartyConfig,
 ) -> Result<Vec<std::process::Command>, Box<dyn std::error::Error>> {
     let win = h.win();
+
+    // Gamepad -> keyboard/mouse translation for games with NO controller support.
+    //
+    // Some games (Torchlight II, Neverwinter Nights) are click-to-move and never read a pad.
+    // Steam Input would normally cover that, but PartyDeck deliberately does not use it - its
+    // pad filter EXCLUDES Valve's virtual devices, and under Goldberg there is no Steam client
+    // to talk to. So translation happens below the game at the evdev layer: pad-keymap.py
+    // grabs a player's pad and re-emits it as one virtual keyboard+mouse device.
+    //
+    // One device per player, not two: a sandboxed SDL only scans /dev/input/event0..31, and on
+    // a machine where those slots are full the second device lands above event31 where nothing
+    // can see it.
+    let mut keymap_nodes: Vec<String> = Vec::new();
+    if !h.pad_keymap.is_empty() {
+        sweep_orphan_pad_keymaps();
+        for (i, instance) in instances.iter().enumerate() {
+            let pad = instance
+                .devices
+                .iter()
+                .map(|&d| &input_devices[d])
+                .find(|d| d.device_type == DeviceType::Gamepad);
+            // IMPORTANT: this Vec is indexed by instance, so every instance must push
+            // exactly one entry. An empty string means "no mapping for this player" - pushing
+            // only on success would shift later players' devices onto earlier players.
+            let Some(pad) = pad else {
+                keymap_nodes.push(String::new());
+                continue;
+            };
+            let out = Command::new(&*BIN_PAD_KEYMAP)
+                .args([
+                    "--device", &pad.path,
+                    "--profile", &h.pad_keymap,
+                    "--index", &(i + 1).to_string(),
+                    "--print-node",
+                ])
+                .stdout(std::process::Stdio::piped())
+                .spawn();
+            match out {
+                Ok(mut child) => {
+                    // The script prints the node it created on its first stdout line, then
+                    // keeps running to pump events. Read just that line.
+                    let node = child
+                        .stdout
+                        .take()
+                        .and_then(|so| {
+                            use std::io::{BufRead, BufReader};
+                            BufReader::new(so).lines().next().and_then(|l| l.ok())
+                        })
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    // Validate before trusting it. This line is fed straight to gamescope's
+                    // --libinput-hold-dev, so anything that is not a device path takes the
+                    // instance down before the game starts - which is exactly what happened
+                    // when the script's first stdout line was a log message.
+                    let looks_like_node = node.starts_with("/dev/input/event")
+                        && node["/dev/input/event".len()..].chars().all(|c| c.is_ascii_digit())
+                        && node.len() > "/dev/input/event".len();
+                    // The node must also EXIST and be openable right now. gamescope treats a
+                    // missing --libinput-hold-dev path as fatal ("Failed to create libinput
+                    // device"), so a stale path here does not degrade the feature - it stops
+                    // the game launching entirely. This translation is a convenience; it must
+                    // never be able to block a launch.
+                    let usable = looks_like_node
+                        && std::fs::OpenOptions::new().read(true).open(&node).is_ok();
+                    if !usable {
+                        println!(
+                            "[partydeck] pad-keymap: node {node:?} unusable for instance {i}, \
+                             launching without controller mapping"
+                        );
+                        // Kill it, or it keeps its exclusive grab on the pad and the NEXT
+                        // session cannot assign that controller at all.
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        keymap_nodes.push(String::new());
+                    } else {
+                        println!("[partydeck] pad-keymap: instance {i} -> {node}");
+                        keymap_nodes.push(node);
+                        if let Ok(mut kids) = KEYMAP_CHILDREN.lock() {
+                            kids.push(child);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("[partydeck] pad-keymap failed to start: {e}");
+                    keymap_nodes.push(String::new());
+                }
+            }
+        }
+    }
+
+
     let exec = Path::new(&h.exec);
     let runtime = h.runtime.as_str();
     let gamescope = match cfg.kbm_support {
@@ -279,6 +416,12 @@ pub fn launch_cmds(
                 }
             }
 
+            // The virtual device this player's pad drives counts as their keyboard+mouse.
+            if let Some(node) = keymap_nodes.get(i).filter(|n| !n.is_empty()) {
+                kbms.push_str(&format!("{},", node));
+                instance_has_keyboard = true;
+                instance_has_mouse = true;
+            }
             if instance_has_keyboard {
                 cmd.arg("--backend-disable-keyboard");
             }
@@ -297,6 +440,13 @@ pub fn launch_cmds(
         cmd.arg("--die-with-parent");
         cmd.args(["--dev-bind", "/", "/"]);
         cmd.args(["--tmpfs", "/tmp"]);
+        // Mask the other players' pad-keymap devices. bwrap uses --dev-bind / /, so every
+        // virtual node is visible inside every sandbox unless it is explicitly covered.
+        for (n, node) in keymap_nodes.iter().enumerate() {
+            if n != i && !node.is_empty() {
+                cmd.args(["--bind", "/dev/null", node]);
+            }
+        }
         // Mask out any gamepads that aren't this player's
         for (d, dev) in input_devices.iter().enumerate() {
             if !dev.enabled

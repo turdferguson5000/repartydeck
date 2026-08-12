@@ -49,6 +49,12 @@ pub struct Handler {
     pub use_goldberg: bool,
     #[serde(default)]
     pub enable_hidraw: bool,
+    /// Gamepad -> keyboard/mouse profile for games with no controller support at all
+    /// (e.g. "torchlight2", "nwn"). Empty = off. When set, PartyDeck runs pad-keymap.py
+    /// for each player's pad before launch and hands the instance the virtual device it
+    /// creates instead of the raw pad.
+    #[serde(default)]
+    pub pad_keymap: String,
     pub steam_appid: Option<u32>,
 
     pub game_null_paths: Vec<String>,
@@ -78,6 +84,7 @@ impl Default for Handler {
             use_mangohud: false,
             use_goldberg: false,
             enable_hidraw: false,
+            pad_keymap: String::new(),
             steam_appid: None,
 
             game_null_paths: Vec::new(),

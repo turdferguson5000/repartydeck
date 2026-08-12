@@ -52,3 +52,9 @@ pub static BIN_GSC_KBM: LazyLock<PathBuf> = LazyLock::new(|| {
     let bin = env::current_exe().unwrap().parent().unwrap().join("bin");
     bin.join("gamescope-kbm")
 });
+
+/// pad-keymap.py: gamepad -> keyboard/mouse translator, used by handlers whose game has no
+/// controller support at all. Shipped in res/ so it travels with the install.
+pub static BIN_PAD_KEYMAP: LazyLock<PathBuf> = LazyLock::new(|| {
+    PATH_RES.join("pad-keymap.py")
+});
