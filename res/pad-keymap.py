@@ -88,6 +88,23 @@ PROFILES = {
     },
 }
 
+# Per-profile cursor behaviour.
+#
+# "pointer" - the stick moves a free-floating cursor, like a mouse. Fine for menus, poor for
+#             click-to-move combat: the cursor drifts away from the character and you spend the
+#             fight hunting for it.
+# "direction" - the stick is a DIRECTION. The cursor is held at a fixed radius from screen
+#             centre on the side you are pushing, and springs back to centre when you let go.
+#             Because the character is always drawn at screen centre in these games, pushing
+#             right and holding A walks right - which is how console ARPG ports handle exactly
+#             this problem. Radius is in pixels from centre: far enough to be outside the
+#             character, close enough that enemies near you are under the cursor.
+CURSOR_MODES = {
+    "torchlight2": ("direction", 230),
+    "nwn":         ("direction", 260),
+    "generic":     ("pointer", 0),
+}
+
 # D-pad is an ABS hat on Xbox pads, not buttons, so it is mapped separately.
 DPAD = {
     "torchlight2": {"up": "KEY_5", "down": "KEY_6", "left": "KEY_7", "right": "KEY_8"},
@@ -99,9 +116,15 @@ DPAD = {
 # emits small relative movements at a fixed rate. A deadzone is essential - analogue sticks
 # rest a few units off centre and the cursor would otherwise drift forever.
 DEADZONE = 6000        # of 32767
-CURSOR_MAX_SPEED = 22  # pixels per tick at full deflection
+# Pixels per tick at full deflection. 22 was the original value and proved far too fast in
+# play - a small stick nudge threw the cursor across the screen. 9 is that reduced by ~60%.
+# Override per run with --cursor-speed.
+CURSOR_MAX_SPEED = 9
 TICK = 0.008           # ~125 Hz, matches a typical mouse polling rate
 PRINT_NODE = False   # set from --print-node; makes stdout machine-readable
+CURSOR_MODE_OVERRIDE = ""   # --cursor-mode
+CURSOR_RADIUS_OVERRIDE = 0  # --cursor-radius
+SCREEN_W, SCREEN_H = 1920, 1080   # --screen WxH; only used by "direction" mode
 SCROLL_INTERVAL = 0.12 # seconds between wheel clicks while the right stick is held
 
 
@@ -212,6 +235,16 @@ def _wait_for_pad(path, index, timeout=None):
 def run(pad, index, profile, grab):
     mapping = PROFILES[profile]
     dpad = DPAD[profile]
+    mode, radius = CURSOR_MODES.get(profile, ("pointer", 0))
+    if CURSOR_MODE_OVERRIDE:
+        mode = CURSOR_MODE_OVERRIDE
+    if CURSOR_RADIUS_OVERRIDE:
+        radius = CURSOR_RADIUS_OVERRIDE
+    screen_w, screen_h = SCREEN_W, SCREEN_H
+    cx0, cy0 = screen_w / 2.0, screen_h / 2.0
+    est_x, est_y = cx0, cy0
+    log_mode = f"cursor mode: {mode}" + (f", radius {radius}px" if mode == "direction" else "")
+
     kb, mouse = make_virtual(index, profile)
     node = getattr(kb, "device", None)
     node = node.path if node is not None else "?"
@@ -230,6 +263,7 @@ def run(pad, index, profile, grab):
     log(f"[pad-keymap] player {index}: {pad.name} ({pad.path}) -> profile '{profile}'")
     warn = "  <-- ABOVE event31, GAME WILL NOT SEE IT" if _event_num(node) > 31 else ""
     log(f"[pad-keymap]   created: PD Keymap {index} at {node}{warn}")
+    log(f"[pad-keymap]   {log_mode}")
 
     if grab:
         try:
@@ -243,6 +277,7 @@ def run(pad, index, profile, grab):
     lx = ly = rx = ry = 0.0
     last_scroll = 0.0
     hat_x = hat_y = 0
+
 
     while True:
         # Wait for pad events, but never longer than one tick, so cursor motion stays smooth
@@ -300,7 +335,30 @@ def run(pad, index, profile, grab):
                 raise
 
         # Cursor motion from the left stick.
-        if lx or ly:
+        if mode == "direction":
+            # Where the cursor SHOULD be: centre plus the stick's deflection scaled to radius.
+            # Only relative motion can be emitted, so the cursor position is tracked by dead
+            # reckoning from an assumed centred start and clamped to the screen. Small drift is
+            # harmless here - the cursor is pulled back to a computed target every tick, so
+            # errors are corrected rather than accumulated.
+            tx = cx0 + lx * radius
+            ty = cy0 + ly * radius
+            dx = tx - est_x
+            dy = ty - est_y
+            step = max(1.0, CURSOR_MAX_SPEED)
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist > 0.5:
+                if dist > step:
+                    dx *= step / dist
+                    dy *= step / dist
+                ix, iy = int(round(dx)), int(round(dy))
+                if ix or iy:
+                    if ix: mouse.write(e.EV_REL, e.REL_X, ix)
+                    if iy: mouse.write(e.EV_REL, e.REL_Y, iy)
+                    mouse.syn()
+                    est_x = min(max(est_x + ix, 0.0), float(screen_w))
+                    est_y = min(max(est_y + iy, 0.0), float(screen_h))
+        elif lx or ly:
             dx = int(round(lx * CURSOR_MAX_SPEED))
             dy = int(round(ly * CURSOR_MAX_SPEED))
             if dx: mouse.write(e.EV_REL, e.REL_X, dx)
@@ -317,12 +375,26 @@ def run(pad, index, profile, grab):
 
 
 def main():
+    # Declared up front: Python requires `global` BEFORE any use of the name in the scope, and
+    # CURSOR_MAX_SPEED is read below as an argparse default.
+    global PRINT_NODE, CURSOR_MAX_SPEED, CURSOR_MODE_OVERRIDE, CURSOR_RADIUS_OVERRIDE
+    global SCREEN_W, SCREEN_H
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--profile", default="generic", choices=sorted(PROFILES),
                     help="key mapping to use (default: generic)")
     ap.add_argument("--device", action="append",
                     help="specific pad, e.g. /dev/input/event5 (repeatable; default: all pads)")
+    ap.add_argument("--cursor-speed", type=float, default=CURSOR_MAX_SPEED,
+                    metavar="N",
+                    help=f"pixels per tick at full stick deflection (default {CURSOR_MAX_SPEED}; "
+                         f"higher is faster)")
+    ap.add_argument("--cursor-mode", choices=["pointer", "direction"], default="",
+                    help="override the profile's cursor behaviour (see CURSOR_MODES)")
+    ap.add_argument("--cursor-radius", type=int, default=0, metavar="PX",
+                    help="direction mode: how far from screen centre the cursor sits")
+    ap.add_argument("--screen", default="", metavar="WxH",
+                    help="direction mode: the instance's resolution (default 1920x1080)")
     ap.add_argument("--no-grab", action="store_true",
                     help="do not take an exclusive grab on the pad")
     ap.add_argument("--index", type=int, default=0,
@@ -355,8 +427,16 @@ def main():
             print(f"  {i}. {p.path}  {p.name}")
         return 0
 
-    global PRINT_NODE
     PRINT_NODE = args.print_node
+    CURSOR_MAX_SPEED = args.cursor_speed
+    CURSOR_MODE_OVERRIDE = args.cursor_mode
+    CURSOR_RADIUS_OVERRIDE = args.cursor_radius
+    if args.screen and "x" in args.screen.lower():
+        w, h = args.screen.lower().split("x", 1)
+        try:
+            SCREEN_W, SCREEN_H = int(w), int(h)
+        except ValueError:
+            pass
 
     if args.device:
         pads = []
