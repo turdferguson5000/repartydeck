@@ -419,11 +419,21 @@ pub fn launch_cmds(
                 }
             }
 
-            // The virtual device this player's pad drives counts as their keyboard+mouse.
+            // Hold this player's translated pad device, but do NOT claim the instance has a
+            // keyboard or mouse because of it.
+            //
+            // Those flags add --backend-disable-keyboard/--backend-disable-mouse, which tell
+            // gamescope to ignore the SDL window's own input. Setting them for a pad-only
+            // instance killed physical keyboard input entirely - and a real keyboard is not
+            // optional in these games: LAN games need a name and password typed, characters
+            // and saves need names, and an Xbox pad cannot type. Leaving the backend enabled
+            // means the physical keyboard and mouse still reach whichever instance has focus,
+            // while the pad drives its own instance through the held device.
+            //
+            // The flags are still set when the player is genuinely ASSIGNED a keyboard or
+            // mouse in PartyDeck, which is the case they exist for.
             if let Some(node) = keymap_nodes.get(i).filter(|n| !n.is_empty()) {
                 kbms.push_str(&format!("{},", node));
-                instance_has_keyboard = true;
-                instance_has_mouse = true;
             }
             if instance_has_keyboard {
                 cmd.arg("--backend-disable-keyboard");

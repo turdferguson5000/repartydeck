@@ -158,6 +158,15 @@ def main():
         check("stub game is the executable being launched",
               all("fakegame.sh" in f for f in flat))
 
+        # THE PHYSICAL KEYBOARD MUST STILL WORK. An Xbox pad cannot type, and these games need
+        # typing constantly - LAN game names and passwords, character and save names. Those
+        # flags tell gamescope to ignore the window's own keyboard/mouse, so a pad-only
+        # instance must NOT set them or the real keyboard is dead in game.
+        check("pad mapping does not disable the physical keyboard",
+              not any("--backend-disable-keyboard" in f for f in flat))
+        check("pad mapping does not disable the physical mouse",
+              not any("--backend-disable-mouse" in f for f in flat))
+
         # Cleanup contract: the dry run really started mappers, and must stop them.
         time.sleep(1.0)
         left = subprocess.run(["pgrep", "-cf", r"/pad-keymap\.py"], capture_output=True,
