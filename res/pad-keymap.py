@@ -37,6 +37,7 @@ import os
 import re
 import select
 import signal
+import subprocess
 import sys
 import time
 
@@ -208,6 +209,29 @@ def scale(value, lo=-32768, hi=32767):
     return out if value > 0 else -out
 
 
+# Select+Start opens the on-screen keyboard.
+#
+# gamepad-osk.service watches for this chord so the host can be typed on with no keyboard, but
+# it cannot see it while a game runs: this mapper takes an EXCLUSIVE grab on the pad, and the
+# per-game profiles map Start and Select to keys of their own. So the chord is handled here and
+# the same toggle script is invoked.
+#
+# Both buttons are emitted on a short DELAY rather than immediately. Firing at once and then
+# retracting would flash Esc into the game (which opens its menu) every time the keyboard is
+# summoned. Waiting ~150ms lets a chord be recognised before either key is sent; a button
+# pressed alone still works, just with that much delay - only on these two buttons.
+OSK_CHORD = {e.BTN_SELECT, e.BTN_START}
+OSK_TOGGLE = os.environ.get("OSK_TOGGLE", "/usr/local/bin/osk-toggle.sh")
+CHORD_WINDOW = 0.15
+
+
+def _fire_osk(log):
+    try:
+        subprocess.Popen([OSK_TOGGLE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log("[pad-keymap]   Select+Start -> on-screen keyboard")
+    except Exception as ex:
+        log(f"[pad-keymap]   could not run {OSK_TOGGLE}: {ex}")
+
 def _wait_for_pad(path, index, timeout=None):
     """Re-open a pad that went away, without tearing down the virtual device.
 
@@ -280,6 +304,9 @@ def run(pad, index, profile, grab):
     lx = ly = rx = ry = 0.0
     last_scroll = 0.0
     hat_x = hat_y = 0
+    pending = {}        # chord buttons held but not yet emitted
+    emitted = set()     # chord buttons whose key was sent (held down)
+    chord_fired = False
 
 
     while True:
@@ -289,7 +316,33 @@ def run(pad, index, profile, grab):
         if r:
             try:
                 for ev in pad.read():
-                    if ev.type == e.EV_KEY and ev.code in mapping:
+                    if ev.type == e.EV_KEY and ev.code in OSK_CHORD:
+                        # Held together -> on-screen keyboard, and neither key is sent on.
+                        if ev.value:
+                            pending[ev.code] = time.monotonic()
+                            if OSK_CHORD.issubset(pending.keys()):
+                                pending.clear()
+                                chord_fired = True
+                                _fire_osk(log)
+                        else:
+                            if ev.code in emitted:
+                                t = mapping.get(ev.code)
+                                if t:
+                                    dev = mouse if t.startswith("BTN_") else kb
+                                    dev.write(e.EV_KEY, getattr(e, t), 0); dev.syn()
+                                emitted.discard(ev.code)
+                            elif ev.code in pending and not chord_fired:
+                                # Released before the window elapsed and alone: a real tap.
+                                t = mapping.get(ev.code)
+                                if t:
+                                    dev = mouse if t.startswith("BTN_") else kb
+                                    dev.write(e.EV_KEY, getattr(e, t), 1); dev.syn()
+                                    time.sleep(0.02)
+                                    dev.write(e.EV_KEY, getattr(e, t), 0); dev.syn()
+                            pending.pop(ev.code, None)
+                            if not pending:
+                                chord_fired = False
+                    elif ev.type == e.EV_KEY and ev.code in mapping:
                         target = mapping[ev.code]
                         code = getattr(e, target)
                         dev = mouse if target.startswith("BTN_") else kb
@@ -336,6 +389,18 @@ def run(pad, index, profile, grab):
                     log(f"[pad-keymap] player {index}: pad back on {pad.path}")
                     continue
                 raise
+
+        # A chord button held longer than the window was pressed on its own: send it now.
+        if pending and not chord_fired:
+            now = time.monotonic()
+            for code, t0 in list(pending.items()):
+                if now - t0 >= CHORD_WINDOW:
+                    target = mapping.get(code)
+                    if target:
+                        dev = mouse if target.startswith("BTN_") else kb
+                        dev.write(e.EV_KEY, getattr(e, target), 1); dev.syn()
+                        emitted.add(code)
+                    pending.pop(code, None)
 
         # Cursor motion from the left stick.
         if mode == "direction":
