@@ -162,7 +162,10 @@ def main():
             run_sum += v.value
             peak = max(peak, abs(run_sum))
         log(f"REL_X events={len(rel)} peak={peak} net={run_sum}")
-        check("left stick moves the cursor", len(rel) > 5 and peak > 40,
+        # Assert DISPLACEMENT, not event count. "region" mode jumps the cursor to its target in
+        # a single large delta - that instant snap is the point of it - so a threshold on the
+        # number of events would fail the mode that works best.
+        check("left stick moves the cursor", peak > 40,
               f"{len(rel)} events, peak={peak}px")
 
         # 6. DEADZONE: a centred stick must not drift.

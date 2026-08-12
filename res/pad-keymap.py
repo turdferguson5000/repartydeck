@@ -111,10 +111,19 @@ PROFILES = {
 # The direction code is kept and still selectable with --cursor-mode direction, because the
 # idea is sound and a smaller radius or a hold-to-tether button might yet be the answer.
 CURSOR_MODES = {
-    "torchlight2": ("pointer", 0),
-    "nwn":         ("pointer", 0),
+    "torchlight2": ("region", 420),
+    "nwn":         ("region", 420),
     "generic":     ("pointer", 0),
 }
+
+# Hold LEFT CLICK while the left stick is deflected.
+#
+# This is the half that makes click-to-move playable, and the half the first attempt missed.
+# In a Diablo-like, holding left click walks the character toward the cursor and attacks what
+# is under it. Steam Input configs for these games do exactly this - tie the click to the stick
+# - so pushing the stick simply walks you that way, instead of requiring a separate button
+# press for every step.
+AUTO_WALK = {"torchlight2": True, "nwn": True, "generic": False}
 
 # D-pad is an ABS hat on Xbox pads, not buttons, so it is mapped separately.
 DPAD = {
@@ -137,6 +146,7 @@ CURSOR_MAX_SPEED = 6.3
 TICK = 0.008           # ~125 Hz, matches a typical mouse polling rate
 PRINT_NODE = False   # set from --print-node; makes stdout machine-readable
 CURSOR_MODE_OVERRIDE = ""   # --cursor-mode
+NO_AUTO_WALK = False        # --no-auto-walk
 CURSOR_RADIUS_OVERRIDE = 0  # --cursor-radius
 SCREEN_W, SCREEN_H = 1920, 1080   # --screen WxH; only used by "direction" mode
 SCROLL_INTERVAL = 0.12 # seconds between wheel clicks while the right stick is held
@@ -315,6 +325,10 @@ def run(pad, index, profile, grab):
     last_scroll = 0.0
     hat_x = hat_y = 0
     manual = False      # right stick has taken the cursor; hold position until the left moves
+    walking = False     # left click currently held by auto-walk
+    auto_walk = AUTO_WALK.get(profile, False)
+    if NO_AUTO_WALK:
+        auto_walk = False
     pending = {}        # chord buttons held but not yet emitted
     emitted = set()     # chord buttons whose key was sent (held down)
     chord_fired = False
@@ -436,6 +450,32 @@ def run(pad, index, profile, grab):
         # Cursor motion from the left stick.
         if manual:
             pass          # hold position; the right stick is in charge
+        elif mode == "region":
+            # STEAM INPUT "MOUSE REGION" BEHAVIOUR.
+            #
+            # The stick maps to an absolute position inside a region centred on the character:
+            # push half-right and the cursor IS half-right, immediately. No easing, no travel
+            # time - the earlier "direction" mode eased toward the target at cursor speed,
+            # which is what made it feel stuck and laggy.
+            #
+            # Only relative motion can be emitted, so the jump is expressed as one large delta
+            # per tick. Position is tracked by dead reckoning and clamped to the screen; every
+            # tick re-aims at a freshly computed target, so error cannot accumulate.
+            tx = cx0 + lx * radius
+            ty = cy0 + ly * radius
+            ix, iy = int(round(tx - est_x)), int(round(ty - est_y))
+            if ix or iy:
+                if ix: mouse.write(e.EV_REL, e.REL_X, ix)
+                if iy: mouse.write(e.EV_REL, e.REL_Y, iy)
+                mouse.syn()
+                est_x = min(max(est_x + ix, 0.0), float(screen_w))
+                est_y = min(max(est_y + iy, 0.0), float(screen_h))
+            # Walk while the stick is held.
+            want_walk = auto_walk and (abs(lx) > 0.0 or abs(ly) > 0.0)
+            if want_walk != walking:
+                mouse.write(e.EV_KEY, e.BTN_LEFT, 1 if want_walk else 0)
+                mouse.syn()
+                walking = want_walk
         elif mode == "direction":
             # Where the cursor SHOULD be: centre plus the stick's deflection scaled to radius.
             # Only relative motion can be emitted, so the cursor position is tracked by dead
@@ -474,7 +514,7 @@ def run(pad, index, profile, grab):
 def main():
     # Declared up front: Python requires `global` BEFORE any use of the name in the scope, and
     # CURSOR_MAX_SPEED is read below as an argparse default.
-    global PRINT_NODE, CURSOR_MAX_SPEED, CURSOR_MODE_OVERRIDE, CURSOR_RADIUS_OVERRIDE
+    global PRINT_NODE, CURSOR_MAX_SPEED, CURSOR_MODE_OVERRIDE, CURSOR_RADIUS_OVERRIDE, NO_AUTO_WALK
     global SCREEN_W, SCREEN_H
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -486,7 +526,9 @@ def main():
                     metavar="N",
                     help=f"pixels per tick at full stick deflection (default {CURSOR_MAX_SPEED}; "
                          f"higher is faster)")
-    ap.add_argument("--cursor-mode", choices=["pointer", "direction"], default="",
+    ap.add_argument("--no-auto-walk", action="store_true",
+                    help="region mode: do NOT hold left click while the stick is deflected")
+    ap.add_argument("--cursor-mode", choices=["pointer", "direction", "region"], default="",
                     help="override the profile's cursor behaviour (see CURSOR_MODES)")
     ap.add_argument("--cursor-radius", type=int, default=0, metavar="PX",
                     help="direction mode: how far from screen centre the cursor sits")
@@ -527,6 +569,7 @@ def main():
     PRINT_NODE = args.print_node
     CURSOR_MAX_SPEED = args.cursor_speed
     CURSOR_MODE_OVERRIDE = args.cursor_mode
+    NO_AUTO_WALK = args.no_auto_walk
     CURSOR_RADIUS_OVERRIDE = args.cursor_radius
     if args.screen and "x" in args.screen.lower():
         w, h = args.screen.lower().split("x", 1)
