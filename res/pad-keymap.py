@@ -111,8 +111,8 @@ PROFILES = {
 # Selectable with --cursor-mode ring if it is ever worth revisiting; do not make it a default
 # again without playing it first.
 CURSOR_MODES = {
-    "torchlight2": ("pointer", 0),
-    "nwn":         ("pointer", 0),
+    "torchlight2": ("ring", 84),
+    "nwn":         ("ring", 84),
     "generic":     ("pointer", 0),
 }
 
@@ -300,6 +300,30 @@ def run(pad, index, profile, grab):
     screen_w, screen_h = SCREEN_W, SCREEN_H
     cx0, cy0 = screen_w / 2.0, screen_h / 2.0
     est_x, est_y = cx0, cy0
+
+    def anchor_centre():
+        """Put the cursor at screen centre and know it is there.
+
+        Ring mode positions the cursor by dead reckoning from an assumed centre, but only
+        RELATIVE motion can be emitted - so if the cursor happens to start somewhere else, the
+        whole region sits off to one side. That is the "not centred" symptom.
+
+        Fix: slam it into the top-left corner with a delta far larger than the screen (the
+        compositor clamps at 0,0, which is what makes this reliable), then step back to centre.
+        After that the estimate and reality agree.
+        """
+        nonlocal est_x, est_y
+        mouse.write(e.EV_REL, e.REL_X, -int(screen_w * 2))
+        mouse.write(e.EV_REL, e.REL_Y, -int(screen_h * 2))
+        mouse.syn()
+        time.sleep(0.05)
+        mouse.write(e.EV_REL, e.REL_X, int(cx0))
+        mouse.write(e.EV_REL, e.REL_Y, int(cy0))
+        mouse.syn()
+        est_x, est_y = cx0, cy0
+
+    if mode == "ring":
+        anchor_centre()
 
     while True:
         # Wait for pad events, but never longer than one tick, so cursor motion stays smooth
