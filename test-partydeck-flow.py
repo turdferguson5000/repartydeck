@@ -164,8 +164,12 @@ def main():
         # instance must NOT set them or the real keyboard is dead in game.
         check("pad mapping does not disable the physical keyboard",
               not any("--backend-disable-keyboard" in f for f in flat))
-        check("pad mapping does not disable the physical mouse",
-              not any("--backend-disable-mouse" in f for f in flat))
+        # The MOUSE flag is now expected: with the backend mouse active gamescope defers to it
+        # and stops drawing a cursor for the held device, so the pointer moves invisibly.
+        # Disabling it restores the drawn cursor. The KEYBOARD flag must stay absent (above) -
+        # an Xbox pad cannot type, and these games need names and passwords.
+        check("pad mapping disables the backend mouse (so the cursor is drawn)",
+              all("--backend-disable-mouse" in f for f in flat))
 
         # Cleanup contract: the dry run really started mappers, and must stop them.
         time.sleep(1.0)

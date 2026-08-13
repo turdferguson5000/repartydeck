@@ -391,6 +391,16 @@ pub fn launch_cmds(
         if cfg.gamescope_force_grab_cursor {
             cmd.arg("--force-grab-cursor");
         }
+
+        // NO --cursor / --hide-cursor-delay HERE.
+        //
+        // Both were added on 2026-08-12 to chase an invisible cursor in Torchlight II, and they
+        // made it WORSE: the cursor had been working with the original mapper, and supplying a
+        // generated PNG that gamescope evidently could not use suppressed it entirely. Because
+        // the flags were unconditional they also poisoned the diagnostic that "proved" the
+        // problem was gamescope's - the mapper was disabled for that test, but --cursor was
+        // still being passed. If a cursor image is ever wanted again, verify gamescope actually
+        // accepts the file before wiring it in.
         if cfg.gamescope_sdl_backend {
             cmd.arg("--backend=sdl");
             cmd.arg(format!("--display-index={}", instance.monitor));
@@ -434,6 +444,16 @@ pub fn launch_cmds(
             // mouse in PartyDeck, which is the case they exist for.
             if let Some(node) = keymap_nodes.get(i).filter(|n| !n.is_empty()) {
                 kbms.push_str(&format!("{},", node));
+                // Disable the backend MOUSE but NOT the backend keyboard.
+                //
+                // These two flags used to be set together, and dropping both to rescue the
+                // physical keyboard also took the cursor with it: with the backend mouse
+                // active, gamescope defers to it and stops drawing a cursor for the held
+                // device, so the pointer moves invisibly. Disabling just the mouse restores
+                // the drawn cursor, while leaving the backend keyboard enabled keeps the real
+                // keyboard working in game - which an Xbox pad cannot replace when a LAN game
+                // or a character needs naming.
+                instance_has_mouse = true;
             }
             if instance_has_keyboard {
                 cmd.arg("--backend-disable-keyboard");

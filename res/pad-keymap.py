@@ -103,9 +103,16 @@ PROFILES = {
 #             An earlier attempt clicked on any deflection at all, which made the character run
 #             off, hid the cursor (holding left click trips a gamescope bug in OpenGL games) and
 #             left enemies untargetable.
+# ALL "pointer" - a free-floating cursor with no tether.
+#
+# "ring" (Valve's mouse-region scheme) was tried twice and rejected in play both times for the
+# same reason: the cursor stops at the region edge, which reads as "stuck with a distance
+# limit" rather than as aiming. The behaviour is correct, it just is not what feels right here.
+# Selectable with --cursor-mode ring if it is ever worth revisiting; do not make it a default
+# again without playing it first.
 CURSOR_MODES = {
-    "torchlight2": ("ring", 420),
-    "nwn":         ("ring", 420),
+    "torchlight2": ("pointer", 0),
+    "nwn":         ("pointer", 0),
     "generic":     ("pointer", 0),
 }
 
