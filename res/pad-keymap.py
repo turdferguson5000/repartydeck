@@ -88,6 +88,39 @@ PROFILES = {
     },
 }
 
+# Cursor behaviour per profile.
+#
+# "pointer" - free-floating mouse, the stick moves it and it stays where you leave it. Correct
+#             for menus, and the only scheme that has ever worked in play here.
+# "ring"    - Valve's official Steam Input mapping for these games, read off the Torchlight II
+#             config: the left stick is an AUTO-CENTERING MOUSE REGION (deflection picks a
+#             position around the character, releasing returns the cursor to centre) and LEFT
+#             CLICK is bound to the OUTER RING - it fires only once the stick reaches the limit
+#             distance.
+#
+#             The outer ring is the whole point. Partial deflection AIMS WITHOUT CLICKING, so
+#             the cursor can be rested on an enemy; pushing to the edge then moves or attacks.
+#             An earlier attempt clicked on any deflection at all, which made the character run
+#             off, hid the cursor (holding left click trips a gamescope bug in OpenGL games) and
+#             left enemies untargetable.
+CURSOR_MODES = {
+    "torchlight2": ("ring", 420),
+    "nwn":         ("ring", 420),
+    "generic":     ("pointer", 0),
+}
+
+# Fraction of full deflection at which the click engages.
+OUTER_RING = 0.9
+
+# Pixels per tick the cursor may travel in ring mode.
+#
+# NOT one big jump. A previous version moved straight to the target in a single delta and the
+# game's own cursor stopped following it entirely - movement collapsed to about eight
+# directions. Small continuous deltas demonstrably work, so the target is approached over a few
+# ticks: 50px at ~125Hz covers the 420px radius in under a tenth of a second, which still feels
+# immediate.
+REGION_STEP = 50
+
 # D-pad is an ABS hat on Xbox pads, not buttons, so it is mapped separately.
 DPAD = {
     "torchlight2": {"up": "KEY_5", "down": "KEY_6", "left": "KEY_7", "right": "KEY_8"},
@@ -105,6 +138,9 @@ DEADZONE = 6000        # of 32767
 CURSOR_MAX_SPEED = 6.3
 TICK = 0.008           # ~125 Hz, matches a typical mouse polling rate
 PRINT_NODE = False   # set from --print-node; makes stdout machine-readable
+CURSOR_MODE_OVERRIDE = ""
+CURSOR_RADIUS_OVERRIDE = 0
+SCREEN_W, SCREEN_H = 1920, 1080
 SCROLL_INTERVAL = 0.12 # seconds between wheel clicks while the right stick is held
 
 
@@ -246,6 +282,17 @@ def run(pad, index, profile, grab):
     lx = ly = rx = ry = 0.0
     last_scroll = 0.0
     hat_x = hat_y = 0
+    manual = False      # right stick has the cursor
+    clicking = False    # left click currently held by the outer ring
+
+    mode, radius = CURSOR_MODES.get(profile, ("pointer", 0))
+    if CURSOR_MODE_OVERRIDE:
+        mode = CURSOR_MODE_OVERRIDE
+    if CURSOR_RADIUS_OVERRIDE:
+        radius = CURSOR_RADIUS_OVERRIDE
+    screen_w, screen_h = SCREEN_W, SCREEN_H
+    cx0, cy0 = screen_w / 2.0, screen_h / 2.0
+    est_x, est_y = cx0, cy0
 
     while True:
         # Wait for pad events, but never longer than one tick, so cursor motion stays smooth
@@ -302,21 +349,56 @@ def run(pad, index, profile, grab):
                     continue
                 raise
 
+        # RIGHT STICK = free mouse, always. Menus need a cursor that reaches the corners and
+        # stays put, which a region-tethered cursor cannot do.
+        if rx or ry:
+            dx = int(round(rx * CURSOR_MAX_SPEED))
+            dy = int(round(ry * CURSOR_MAX_SPEED))
+            if dx or dy:
+                if dx: mouse.write(e.EV_REL, e.REL_X, dx)
+                if dy: mouse.write(e.EV_REL, e.REL_Y, dy)
+                mouse.syn()
+                est_x = min(max(est_x + dx, 0.0), float(screen_w))
+                est_y = min(max(est_y + dy, 0.0), float(screen_h))
+            manual = True
+        elif lx or ly:
+            manual = False          # left stick takes control back
+
         # Cursor motion from the left stick.
-        if lx or ly:
+        if manual:
+            pass                    # right stick is driving; leave the cursor alone
+        elif mode == "ring":
+            # Absolute position within the region, approached over a few ticks (see REGION_STEP).
+            tx = cx0 + lx * radius
+            ty = cy0 + ly * radius
+            dx, dy = tx - est_x, ty - est_y
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist > 0.5:
+                if dist > REGION_STEP:
+                    dx *= REGION_STEP / dist
+                    dy *= REGION_STEP / dist
+                ix, iy = int(round(dx)), int(round(dy))
+                if ix or iy:
+                    if ix: mouse.write(e.EV_REL, e.REL_X, ix)
+                    if iy: mouse.write(e.EV_REL, e.REL_Y, iy)
+                    mouse.syn()
+                    est_x = min(max(est_x + ix, 0.0), float(screen_w))
+                    est_y = min(max(est_y + iy, 0.0), float(screen_h))
+            # OUTER RING: click only at the limit, so partial deflection aims silently.
+            at_ring = (lx * lx + ly * ly) ** 0.5 >= OUTER_RING
+            if at_ring != clicking:
+                mouse.write(e.EV_KEY, e.BTN_LEFT, 1 if at_ring else 0)
+                mouse.syn()
+                clicking = at_ring
+        elif lx or ly:
             dx = int(round(lx * CURSOR_MAX_SPEED))
             dy = int(round(ly * CURSOR_MAX_SPEED))
             if dx: mouse.write(e.EV_REL, e.REL_X, dx)
             if dy: mouse.write(e.EV_REL, e.REL_Y, dy)
             mouse.syn()
 
-        # Right stick scrolls (zoom in these games), rate-limited so one nudge is one click.
-        if ry:
-            now = time.monotonic()
-            if now - last_scroll >= SCROLL_INTERVAL:
-                mouse.write(e.EV_REL, e.REL_WHEEL, -1 if ry > 0 else 1)
-                mouse.syn()
-                last_scroll = now
+        # (The right stick used to emit scroll wheel here. Menu navigation needs it as a free
+        # mouse far more; the wheel still works from a real mouse.)
 
 
 def main():
@@ -326,6 +408,12 @@ def main():
                     help="key mapping to use (default: generic)")
     ap.add_argument("--device", action="append",
                     help="specific pad, e.g. /dev/input/event5 (repeatable; default: all pads)")
+    ap.add_argument("--cursor-mode", choices=["pointer", "ring"], default="",
+                    help="override the profile's cursor behaviour (see CURSOR_MODES)")
+    ap.add_argument("--cursor-radius", type=int, default=0, metavar="PX",
+                    help="ring mode: how far from centre the cursor reaches at full deflection")
+    ap.add_argument("--screen", default="", metavar="WxH",
+                    help="ring mode: the instance's resolution (default 1920x1080)")
     ap.add_argument("--no-grab", action="store_true",
                     help="do not take an exclusive grab on the pad")
     ap.add_argument("--index", type=int, default=0,

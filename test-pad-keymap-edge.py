@@ -207,13 +207,18 @@ def main():
         c5 = Collector(n3, 2.0)
         c5.start()
         time.sleep(0.4)
-        pads[0].write(e.EV_ABS, e.ABS_RY, -30000); pads[0].syn()  # right stick up
+        pads[0].write(e.EV_ABS, e.ABS_RX, 30000); pads[0].syn()   # right stick right
         time.sleep(1.0)
-        pads[0].write(e.EV_ABS, e.ABS_RY, 0); pads[0].syn()
+        pads[0].write(e.EV_ABS, e.ABS_RX, 0); pads[0].syn()
         c5.join()
-        wheel = [v for v in c5.events if v.type == e.EV_REL and v.code == e.REL_WHEEL]
-        log(f"wheel events={len(wheel)}")
-        check("right stick emits scroll wheel", len(wheel) >= 3, f"{len(wheel)} events")
+        # The right stick is a FREE MOUSE now, not a scroll wheel. Menus need a cursor that
+        # reaches the corners and stays where it is put, which the ring-tethered left stick
+        # cannot do; the wheel is still available from a real mouse.
+        rel = [v for v in c5.events if v.type == e.EV_REL and v.code == e.REL_X]
+        travelled = sum(v.value for v in rel)
+        log(f"right-stick REL_X events={len(rel)} net={travelled}")
+        check("right stick moves the cursor freely (menus)",
+              len(rel) > 5 and abs(travelled) > 50, f"{len(rel)} events, {travelled}px")
 
     finally:
         for p in procs:

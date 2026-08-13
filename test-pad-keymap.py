@@ -153,10 +153,41 @@ def main():
         pad.write(e.EV_ABS, e.ABS_X, 0); pad.syn()
         col.join()
         rel = [v for v in col.events if v.type == e.EV_REL and v.code == e.REL_X]
-        moved = sum(v.value for v in rel)
-        log(f"REL_X events={len(rel)} total={moved}")
-        check("left stick moves the cursor", len(rel) > 5 and moved > 0,
-              f"{len(rel)} events, sum={moved}")
+        # PEAK, not net. "ring" mode recentres the cursor when the stick is released, so the
+        # net sum over a press-and-release window is zero by design.
+        run_sum, peak = 0, 0
+        for v in rel:
+            run_sum += v.value
+            peak = max(peak, abs(run_sum))
+        log(f"REL_X events={len(rel)} peak={peak} net={run_sum}")
+        check("left stick moves the cursor", peak > 40, f"{len(rel)} events, peak={peak}px")
+
+        # THE OUTER RING - Valve's scheme, and the thing every earlier attempt got wrong.
+        # Partial deflection must AIM WITHOUT CLICKING so an enemy can be rested under the
+        # cursor; the click engages only at the limit.
+        col = Collector(node, 1.6)
+        col.start()
+        time.sleep(0.3)
+        pad.write(e.EV_ABS, e.ABS_X, 16000); pad.syn()   # ~half
+        time.sleep(0.8)
+        pad.write(e.EV_ABS, e.ABS_X, 0); pad.syn()
+        col.join()
+        half_rel = [v for v in col.events if v.type == e.EV_REL and v.code == e.REL_X]
+        half_clicks = [v for v in col.events if v.type == e.EV_KEY and v.code == e.BTN_LEFT]
+        check("partial deflection aims WITHOUT clicking",
+              len(half_rel) > 0 and not half_clicks,
+              f"{len(half_rel)} motions, {len(half_clicks)} clicks")
+
+        col = Collector(node, 1.6)
+        col.start()
+        time.sleep(0.3)
+        pad.write(e.EV_ABS, e.ABS_X, 32000); pad.syn()   # to the ring
+        time.sleep(0.8)
+        pad.write(e.EV_ABS, e.ABS_X, 0); pad.syn()
+        col.join()
+        full_clicks = [v.value for v in col.events if v.type == e.EV_KEY and v.code == e.BTN_LEFT]
+        check("full deflection clicks, and releases on recentre", full_clicks == [1, 0],
+              str(full_clicks))
 
         # 6. DEADZONE: a centred stick must not drift.
         col = Collector(node, 1.2)
