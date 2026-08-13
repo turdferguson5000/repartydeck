@@ -37,7 +37,6 @@ import os
 import re
 import select
 import signal
-import subprocess
 import sys
 import time
 
@@ -89,62 +88,6 @@ PROFILES = {
     },
 }
 
-# Per-profile cursor behaviour.
-#
-# "pointer" - the stick moves a free-floating cursor, like a mouse. Fine for menus, poor for
-#             click-to-move combat: the cursor drifts away from the character and you spend the
-#             fight hunting for it.
-# "direction" - the stick is a DIRECTION. The cursor is held at a fixed radius from screen
-#             centre on the side you are pushing, and springs back to centre when you let go.
-#             Because the character is always drawn at screen centre in these games, pushing
-#             right and holding A walks right - which is how console ARPG ports handle exactly
-#             this problem. Radius is in pixels from centre: far enough to be outside the
-#             character, close enough that enemies near you are under the cursor.
-# TESTED IN PLAY AND REVERTED TO "pointer" (2026-08-12).
-#
-# "direction" is how console ARPG ports solve click-to-move, and it works exactly as designed -
-# but in the hand it felt broken rather than helpful: the cursor "always returns to the same
-# coordinates and only goes so far in any direction", which is the tether doing its job and
-# reading as a stuck cursor. The free mouse on the right stick was the part that felt right, so
-# both sticks are free pointers now.
-#
-# The direction code is kept and still selectable with --cursor-mode direction, because the
-# idea is sound and a smaller radius or a hold-to-tether button might yet be the answer.
-# ALL "pointer" - the only scheme confirmed working in play.
-#
-# "region" (Steam Input's absolute mouse-region idea) was tried and failed on this stack: the
-# game's own cursor sat near screen centre and did not follow, and movement collapsed to about
-# eight directions. Region mode moves the cursor in ONE large delta per tick, and something in
-# the gamescope/OpenGL path does not survive that - whereas the small continuous deltas that
-# "pointer" emits demonstrably do, which is why the right stick always felt right.
-#
-# Both modes are kept and selectable (--cursor-mode region|direction), but neither should be a
-# default again without being played first.
-CURSOR_MODES = {
-    "torchlight2": ("pointer", 0),
-    "nwn":         ("pointer", 0),
-    "generic":     ("pointer", 0),
-}
-
-# Hold LEFT CLICK while the left stick is deflected.
-#
-# This is the half that makes click-to-move playable, and the half the first attempt missed.
-# In a Diablo-like, holding left click walks the character toward the cursor and attacks what
-# is under it. Steam Input configs for these games do exactly this - tie the click to the stick
-# - so pushing the stick simply walks you that way, instead of requiring a separate button
-# press for every step.
-# OFF BY DEFAULT after testing in play. Holding left click continuously caused two problems:
-#
-#  * THE CURSOR VANISHED. A widely reported gamescope bug - the visible cursor freezes the
-#    moment left click is held and an invisible one takes over (ValveSoftware/gamescope#2180,
-#    #2006, both specifically OpenGL games, which Torchlight II is).
-#  * THE CHARACTER RAN ON. A click in these games issues a move order that continues until the
-#    destination is reached, so a held click plus a cursor pinned at the region edge means
-#    running in that direction with no way to stop or to target an enemy.
-#
-# Enable with --auto-walk if a game turns out to suit it.
-AUTO_WALK = {"torchlight2": False, "nwn": False, "generic": False}
-
 # D-pad is an ABS hat on Xbox pads, not buttons, so it is mapped separately.
 DPAD = {
     "torchlight2": {"up": "KEY_5", "down": "KEY_6", "left": "KEY_7", "right": "KEY_8"},
@@ -156,19 +99,12 @@ DPAD = {
 # emits small relative movements at a fixed rate. A deadzone is essential - analogue sticks
 # rest a few units off centre and the cursor would otherwise drift forever.
 DEADZONE = 6000        # of 32767
-# How fast the cursor travels, in pixels per tick (~125 ticks/sec).
-#
-# 22 was the original and proved far too fast - a small stick nudge threw the cursor across the
-# screen. 9 was that reduced ~60%, and still too quick in play. 6.3 is a further 30% off.
-# In "direction" mode this governs how quickly the cursor eases out to its parked position and
-# back, NOT how far it parks - that is the per-profile radius. Override with --cursor-speed.
+# Reduced from 22 after play testing - a small stick nudge threw the cursor across the screen.
+# This is the one setting kept from the joystick experiments; the cursor MODES (direction,
+# region, auto-walk) were rolled back with the rest. Override with --cursor-speed.
 CURSOR_MAX_SPEED = 6.3
 TICK = 0.008           # ~125 Hz, matches a typical mouse polling rate
 PRINT_NODE = False   # set from --print-node; makes stdout machine-readable
-CURSOR_MODE_OVERRIDE = ""   # --cursor-mode
-FORCE_AUTO_WALK = False     # --auto-walk
-CURSOR_RADIUS_OVERRIDE = 0  # --cursor-radius
-SCREEN_W, SCREEN_H = 1920, 1080   # --screen WxH; only used by "direction" mode
 SCROLL_INTERVAL = 0.12 # seconds between wheel clicks while the right stick is held
 
 
@@ -249,29 +185,6 @@ def scale(value, lo=-32768, hi=32767):
     return out if value > 0 else -out
 
 
-# Select+Start opens the on-screen keyboard.
-#
-# gamepad-osk.service watches for this chord so the host can be typed on with no keyboard, but
-# it cannot see it while a game runs: this mapper takes an EXCLUSIVE grab on the pad, and the
-# per-game profiles map Start and Select to keys of their own. So the chord is handled here and
-# the same toggle script is invoked.
-#
-# Both buttons are emitted on a short DELAY rather than immediately. Firing at once and then
-# retracting would flash Esc into the game (which opens its menu) every time the keyboard is
-# summoned. Waiting ~150ms lets a chord be recognised before either key is sent; a button
-# pressed alone still works, just with that much delay - only on these two buttons.
-OSK_CHORD = {e.BTN_SELECT, e.BTN_START}
-OSK_TOGGLE = os.environ.get("OSK_TOGGLE", "/usr/local/bin/osk-toggle.sh")
-CHORD_WINDOW = 0.15
-
-
-def _fire_osk(log):
-    try:
-        subprocess.Popen([OSK_TOGGLE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        log("[pad-keymap]   Select+Start -> on-screen keyboard")
-    except Exception as ex:
-        log(f"[pad-keymap]   could not run {OSK_TOGGLE}: {ex}")
-
 def _wait_for_pad(path, index, timeout=None):
     """Re-open a pad that went away, without tearing down the virtual device.
 
@@ -302,16 +215,6 @@ def _wait_for_pad(path, index, timeout=None):
 def run(pad, index, profile, grab):
     mapping = PROFILES[profile]
     dpad = DPAD[profile]
-    mode, radius = CURSOR_MODES.get(profile, ("pointer", 0))
-    if CURSOR_MODE_OVERRIDE:
-        mode = CURSOR_MODE_OVERRIDE
-    if CURSOR_RADIUS_OVERRIDE:
-        radius = CURSOR_RADIUS_OVERRIDE
-    screen_w, screen_h = SCREEN_W, SCREEN_H
-    cx0, cy0 = screen_w / 2.0, screen_h / 2.0
-    est_x, est_y = cx0, cy0
-    log_mode = f"cursor mode: {mode}" + (f", radius {radius}px" if mode == "direction" else "")
-
     kb, mouse = make_virtual(index, profile)
     node = getattr(kb, "device", None)
     node = node.path if node is not None else "?"
@@ -330,7 +233,6 @@ def run(pad, index, profile, grab):
     log(f"[pad-keymap] player {index}: {pad.name} ({pad.path}) -> profile '{profile}'")
     warn = "  <-- ABOVE event31, GAME WILL NOT SEE IT" if _event_num(node) > 31 else ""
     log(f"[pad-keymap]   created: PD Keymap {index} at {node}{warn}")
-    log(f"[pad-keymap]   {log_mode}")
 
     if grab:
         try:
@@ -344,15 +246,6 @@ def run(pad, index, profile, grab):
     lx = ly = rx = ry = 0.0
     last_scroll = 0.0
     hat_x = hat_y = 0
-    manual = False      # right stick has taken the cursor; hold position until the left moves
-    walking = False     # left click currently held by auto-walk
-    auto_walk = AUTO_WALK.get(profile, False)
-    if FORCE_AUTO_WALK:
-        auto_walk = True
-    pending = {}        # chord buttons held but not yet emitted
-    emitted = set()     # chord buttons whose key was sent (held down)
-    chord_fired = False
-
 
     while True:
         # Wait for pad events, but never longer than one tick, so cursor motion stays smooth
@@ -361,33 +254,7 @@ def run(pad, index, profile, grab):
         if r:
             try:
                 for ev in pad.read():
-                    if ev.type == e.EV_KEY and ev.code in OSK_CHORD:
-                        # Held together -> on-screen keyboard, and neither key is sent on.
-                        if ev.value:
-                            pending[ev.code] = time.monotonic()
-                            if OSK_CHORD.issubset(pending.keys()):
-                                pending.clear()
-                                chord_fired = True
-                                _fire_osk(log)
-                        else:
-                            if ev.code in emitted:
-                                t = mapping.get(ev.code)
-                                if t:
-                                    dev = mouse if t.startswith("BTN_") else kb
-                                    dev.write(e.EV_KEY, getattr(e, t), 0); dev.syn()
-                                emitted.discard(ev.code)
-                            elif ev.code in pending and not chord_fired:
-                                # Released before the window elapsed and alone: a real tap.
-                                t = mapping.get(ev.code)
-                                if t:
-                                    dev = mouse if t.startswith("BTN_") else kb
-                                    dev.write(e.EV_KEY, getattr(e, t), 1); dev.syn()
-                                    time.sleep(0.02)
-                                    dev.write(e.EV_KEY, getattr(e, t), 0); dev.syn()
-                            pending.pop(ev.code, None)
-                            if not pending:
-                                chord_fired = False
-                    elif ev.type == e.EV_KEY and ev.code in mapping:
+                    if ev.type == e.EV_KEY and ev.code in mapping:
                         target = mapping[ev.code]
                         code = getattr(e, target)
                         dev = mouse if target.startswith("BTN_") else kb
@@ -435,127 +302,30 @@ def run(pad, index, profile, grab):
                     continue
                 raise
 
-        # A chord button held longer than the window was pressed on its own: send it now.
-        if pending and not chord_fired:
-            now = time.monotonic()
-            for code, t0 in list(pending.items()):
-                if now - t0 >= CHORD_WINDOW:
-                    target = mapping.get(code)
-                    if target:
-                        dev = mouse if target.startswith("BTN_") else kb
-                        dev.write(e.EV_KEY, getattr(e, target), 1); dev.syn()
-                        emitted.add(code)
-                    pending.pop(code, None)
-
-        # RIGHT STICK = free mouse, for menus.
-        #
-        # "direction" mode tethers the cursor to a fixed radius around the character, which is
-        # right for combat and useless for an inventory screen - you cannot reach a slot in the
-        # corner. The right stick moves the cursor freely and it STAYS where you leave it, so
-        # menus work like a mouse. Pushing the left stick returns control to combat targeting.
-        if rx or ry:
-            dx = int(round(rx * CURSOR_MAX_SPEED))
-            dy = int(round(ry * CURSOR_MAX_SPEED))
-            if dx or dy:
-                if dx: mouse.write(e.EV_REL, e.REL_X, dx)
-                if dy: mouse.write(e.EV_REL, e.REL_Y, dy)
-                mouse.syn()
-                est_x = min(max(est_x + dx, 0.0), float(screen_w))
-                est_y = min(max(est_y + dy, 0.0), float(screen_h))
-            manual = True
-        elif lx or ly:
-            # Left stick reasserts combat targeting.
-            manual = False
-
         # Cursor motion from the left stick.
-        if manual:
-            pass          # hold position; the right stick is in charge
-        elif mode == "region":
-            # STEAM INPUT "MOUSE REGION" BEHAVIOUR.
-            #
-            # The stick maps to an absolute position inside a region centred on the character:
-            # push half-right and the cursor IS half-right, immediately. No easing, no travel
-            # time - the earlier "direction" mode eased toward the target at cursor speed,
-            # which is what made it feel stuck and laggy.
-            #
-            # Only relative motion can be emitted, so the jump is expressed as one large delta
-            # per tick. Position is tracked by dead reckoning and clamped to the screen; every
-            # tick re-aims at a freshly computed target, so error cannot accumulate.
-            tx = cx0 + lx * radius
-            ty = cy0 + ly * radius
-            ix, iy = int(round(tx - est_x)), int(round(ty - est_y))
-            if ix or iy:
-                if ix: mouse.write(e.EV_REL, e.REL_X, ix)
-                if iy: mouse.write(e.EV_REL, e.REL_Y, iy)
-                mouse.syn()
-                est_x = min(max(est_x + ix, 0.0), float(screen_w))
-                est_y = min(max(est_y + iy, 0.0), float(screen_h))
-            # Walk while the stick is held.
-            want_walk = auto_walk and (abs(lx) > 0.0 or abs(ly) > 0.0)
-            if want_walk != walking:
-                mouse.write(e.EV_KEY, e.BTN_LEFT, 1 if want_walk else 0)
-                mouse.syn()
-                walking = want_walk
-        elif mode == "direction":
-            # Where the cursor SHOULD be: centre plus the stick's deflection scaled to radius.
-            # Only relative motion can be emitted, so the cursor position is tracked by dead
-            # reckoning from an assumed centred start and clamped to the screen. Small drift is
-            # harmless here - the cursor is pulled back to a computed target every tick, so
-            # errors are corrected rather than accumulated.
-            tx = cx0 + lx * radius
-            ty = cy0 + ly * radius
-            dx = tx - est_x
-            dy = ty - est_y
-            step = max(1.0, CURSOR_MAX_SPEED)
-            dist = (dx * dx + dy * dy) ** 0.5
-            if dist > 0.5:
-                if dist > step:
-                    dx *= step / dist
-                    dy *= step / dist
-                ix, iy = int(round(dx)), int(round(dy))
-                if ix or iy:
-                    if ix: mouse.write(e.EV_REL, e.REL_X, ix)
-                    if iy: mouse.write(e.EV_REL, e.REL_Y, iy)
-                    mouse.syn()
-                    est_x = min(max(est_x + ix, 0.0), float(screen_w))
-                    est_y = min(max(est_y + iy, 0.0), float(screen_h))
-        elif lx or ly:
+        if lx or ly:
             dx = int(round(lx * CURSOR_MAX_SPEED))
             dy = int(round(ly * CURSOR_MAX_SPEED))
             if dx: mouse.write(e.EV_REL, e.REL_X, dx)
             if dy: mouse.write(e.EV_REL, e.REL_Y, dy)
             mouse.syn()
 
-        # NOTE: the right stick used to emit scroll-wheel clicks (zoom). Menu navigation needs
-        # a free cursor far more than the games need stick zoom, so the stick now moves the
-        # pointer instead. Zoom is still available on the mouse wheel itself.
+        # Right stick scrolls (zoom in these games), rate-limited so one nudge is one click.
+        if ry:
+            now = time.monotonic()
+            if now - last_scroll >= SCROLL_INTERVAL:
+                mouse.write(e.EV_REL, e.REL_WHEEL, -1 if ry > 0 else 1)
+                mouse.syn()
+                last_scroll = now
 
 
 def main():
-    # Declared up front: Python requires `global` BEFORE any use of the name in the scope, and
-    # CURSOR_MAX_SPEED is read below as an argparse default.
-    global PRINT_NODE, CURSOR_MAX_SPEED, CURSOR_MODE_OVERRIDE, CURSOR_RADIUS_OVERRIDE, FORCE_AUTO_WALK
-    global SCREEN_W, SCREEN_H
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--profile", default="generic", choices=sorted(PROFILES),
                     help="key mapping to use (default: generic)")
     ap.add_argument("--device", action="append",
                     help="specific pad, e.g. /dev/input/event5 (repeatable; default: all pads)")
-    ap.add_argument("--cursor-speed", type=float, default=CURSOR_MAX_SPEED,
-                    metavar="N",
-                    help=f"pixels per tick at full stick deflection (default {CURSOR_MAX_SPEED}; "
-                         f"higher is faster)")
-    ap.add_argument("--auto-walk", action="store_true",
-                    help="region mode: HOLD left click while the stick is deflected. Off by "
-                         "default - it hides the cursor in OpenGL games and makes the character "
-                         "run on (see AUTO_WALK)")
-    ap.add_argument("--cursor-mode", choices=["pointer", "direction", "region"], default="",
-                    help="override the profile's cursor behaviour (see CURSOR_MODES)")
-    ap.add_argument("--cursor-radius", type=int, default=0, metavar="PX",
-                    help="direction mode: how far from screen centre the cursor sits")
-    ap.add_argument("--screen", default="", metavar="WxH",
-                    help="direction mode: the instance's resolution (default 1920x1080)")
     ap.add_argument("--no-grab", action="store_true",
                     help="do not take an exclusive grab on the pad")
     ap.add_argument("--index", type=int, default=0,
@@ -588,17 +358,8 @@ def main():
             print(f"  {i}. {p.path}  {p.name}")
         return 0
 
+    global PRINT_NODE
     PRINT_NODE = args.print_node
-    CURSOR_MAX_SPEED = args.cursor_speed
-    CURSOR_MODE_OVERRIDE = args.cursor_mode
-    FORCE_AUTO_WALK = args.auto_walk
-    CURSOR_RADIUS_OVERRIDE = args.cursor_radius
-    if args.screen and "x" in args.screen.lower():
-        w, h = args.screen.lower().split("x", 1)
-        try:
-            SCREEN_W, SCREEN_H = int(w), int(h)
-        except ValueError:
-            pass
 
     if args.device:
         pads = []
