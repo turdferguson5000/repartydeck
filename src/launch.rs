@@ -423,6 +423,13 @@ pub fn launch_cmds(
                     instance_has_keyboard = true;
                 } else if dev.device_type == DeviceType::Mouse {
                     instance_has_mouse = true;
+
+                // NO --hide-cursor-delay HERE.
+                //
+                // Tried and reverted: it makes gamescope permanently draw ITS OWN cursor, and
+                // gamescope's pointer never moves - our device's motion is delivered to the
+                // game through InputStealer, not to gamescope's pointer. The result is a
+                // second, frozen cursor stuck at 0,0 that no stick input can shift.
                 }
                 if dev.device_type == DeviceType::Keyboard || dev.device_type == DeviceType::Mouse {
                     kbms.push_str(&format!("{},", &dev.path));

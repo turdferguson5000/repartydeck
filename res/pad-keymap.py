@@ -119,6 +119,11 @@ CURSOR_MODES = {
 # Fraction of full deflection at which the click engages.
 OUTER_RING = 0.9
 
+# Left stick click (L3) locks and unlocks the ring. Only meaningful in "ring" mode; in that
+# mode it REPLACES whatever the profile maps L3 to, because being able to place the ring on
+# your character matters more than one extra hotkey.
+RING_LOCK_BUTTON = e.BTN_THUMBL
+
 # Pixels per tick the cursor may travel in ring mode.
 #
 # NOT one big jump. A previous version moved straight to the target in a single delta and the
@@ -228,6 +233,23 @@ def scale(value, lo=-32768, hi=32767):
     return out if value > 0 else -out
 
 
+def scale_stick(raw_x, raw_y):
+    """Raw stick pair -> (x, y) in the unit disc, with a RADIAL deadzone and curve.
+
+    Scaling each axis on its own is wrong for a stick, and it broke diagonals: pushed fully
+    into a corner each axis reads ~0.7, and after the curve the pair only reached ~0.66 of the
+    unit circle - never far enough to hit the outer ring, so a diagonal could aim but never
+    click or move. Deadzone and curve belong on the MAGNITUDE; the direction is then preserved
+    exactly and every direction can reach the edge.
+    """
+    mag = (raw_x * raw_x + raw_y * raw_y) ** 0.5
+    if mag < DEADZONE:
+        return 0.0, 0.0
+    span = 32767.0 - DEADZONE
+    out = min((mag - DEADZONE) / span, 1.0) ** 1.6
+    return out * (raw_x / mag), out * (raw_y / mag)
+
+
 def _wait_for_pad(path, index, timeout=None):
     """Re-open a pad that went away, without tearing down the virtual device.
 
@@ -287,6 +309,8 @@ def run(pad, index, profile, grab):
             log(f"[pad-keymap]   WARNING could not grab: {ex}")
 
     lx = ly = rx = ry = 0.0
+    raw_lx = raw_ly = raw_rx = raw_ry = 0
+    raw_changed = False
     last_scroll = 0.0
     hat_x = hat_y = 0
     manual = False      # right stick has the cursor
@@ -297,33 +321,10 @@ def run(pad, index, profile, grab):
         mode = CURSOR_MODE_OVERRIDE
     if CURSOR_RADIUS_OVERRIDE:
         radius = CURSOR_RADIUS_OVERRIDE
-    screen_w, screen_h = SCREEN_W, SCREEN_H
-    cx0, cy0 = screen_w / 2.0, screen_h / 2.0
-    est_x, est_y = cx0, cy0
-
-    def anchor_centre():
-        """Put the cursor at screen centre and know it is there.
-
-        Ring mode positions the cursor by dead reckoning from an assumed centre, but only
-        RELATIVE motion can be emitted - so if the cursor happens to start somewhere else, the
-        whole region sits off to one side. That is the "not centred" symptom.
-
-        Fix: slam it into the top-left corner with a delta far larger than the screen (the
-        compositor clamps at 0,0, which is what makes this reliable), then step back to centre.
-        After that the estimate and reality agree.
-        """
-        nonlocal est_x, est_y
-        mouse.write(e.EV_REL, e.REL_X, -int(screen_w * 2))
-        mouse.write(e.EV_REL, e.REL_Y, -int(screen_h * 2))
-        mouse.syn()
-        time.sleep(0.05)
-        mouse.write(e.EV_REL, e.REL_X, int(cx0))
-        mouse.write(e.EV_REL, e.REL_Y, int(cy0))
-        mouse.syn()
-        est_x, est_y = cx0, cy0
-
-    if mode == "ring":
-        anchor_centre()
+    # Ring bookkeeping - offsets from the resting cursor, never screen coordinates.
+    ring_locked = True      # L3 toggles; see RING_LOCK_BUTTON
+    want_x = want_y = 0.0   # offset we want, float
+    sent_x = sent_y = 0     # integer total actually emitted
 
     while True:
         # Wait for pad events, but never longer than one tick, so cursor motion stays smooth
@@ -332,17 +333,43 @@ def run(pad, index, profile, grab):
         if r:
             try:
                 for ev in pad.read():
-                    if ev.type == e.EV_KEY and ev.code in mapping:
+                    if (ev.type == e.EV_KEY and ev.code == RING_LOCK_BUTTON
+                            and mode == "ring"):
+                        # L3 toggles the ring lock.
+                        #
+                        # The ring is centred on wherever the cursor rests, and we cannot
+                        # address the screen to put it on the character ourselves. So: unlock,
+                        # drive the cursor onto your character with the left stick as a plain
+                        # mouse, lock, and it stays the centre from then on. Unlock again for
+                        # menus, where a tethered cursor cannot reach a corner.
+                        if ev.value == 1:
+                            ring_locked = not ring_locked
+                            # Whatever is under the cursor now becomes the centre.
+                            want_x = want_y = 0.0
+                            sent_x = sent_y = 0
+                            if clicking:
+                                mouse.write(e.EV_KEY, e.BTN_LEFT, 0)
+                                mouse.syn()
+                                clicking = False
+                            log(f"[pad-keymap] player {index}: ring "
+                                f"{'LOCKED (centred here)' if ring_locked else 'UNLOCKED (free cursor)'}")
+                    elif ev.type == e.EV_KEY and ev.code in mapping:
                         target = mapping[ev.code]
                         code = getattr(e, target)
                         dev = mouse if target.startswith("BTN_") else kb
                         dev.write(e.EV_KEY, code, 1 if ev.value else 0)
                         dev.syn()
                     elif ev.type == e.EV_ABS:
-                        if ev.code == e.ABS_X:    lx = scale(ev.value)
-                        elif ev.code == e.ABS_Y:  ly = scale(ev.value)
-                        elif ev.code == e.ABS_RX: rx = scale(ev.value)
-                        elif ev.code == e.ABS_RY: ry = scale(ev.value)
+                        if ev.code == e.ABS_X:    raw_lx = ev.value
+                        elif ev.code == e.ABS_Y:  raw_ly = ev.value
+                        elif ev.code == e.ABS_RX: raw_rx = ev.value
+                        elif ev.code == e.ABS_RY: raw_ry = ev.value
+                        else:
+                            raw_changed = False
+                        if ev.code in (e.ABS_X, e.ABS_Y):
+                            lx, ly = scale_stick(raw_lx, raw_ly)
+                        elif ev.code in (e.ABS_RX, e.ABS_RY):
+                            rx, ry = scale_stick(raw_rx, raw_ry)
                         elif ev.code == e.ABS_HAT0X:
                             # Release the previous direction before pressing the new one.
                             if hat_x and ev.value != hat_x:
@@ -389,8 +416,11 @@ def run(pad, index, profile, grab):
                 if dx: mouse.write(e.EV_REL, e.REL_X, dx)
                 if dy: mouse.write(e.EV_REL, e.REL_Y, dy)
                 mouse.syn()
-                est_x = min(max(est_x + dx, 0.0), float(screen_w))
-                est_y = min(max(est_y + dy, 0.0), float(screen_h))
+            # The right stick repositions the cursor freely, which means the ring's origin
+            # moves with it. Reset the offset bookkeeping so the new resting place becomes
+            # the centre - park the cursor on your character and the ring is centred there.
+            want_x = want_y = 0.0
+            sent_x = sent_y = 0
             manual = True
         elif lx or ly:
             manual = False          # left stick takes control back
@@ -398,23 +428,42 @@ def run(pad, index, profile, grab):
         # Cursor motion from the left stick.
         if manual:
             pass                    # right stick is driving; leave the cursor alone
-        elif mode == "ring":
-            # Absolute position within the region, approached over a few ticks (see REGION_STEP).
-            tx = cx0 + lx * radius
-            ty = cy0 + ly * radius
-            dx, dy = tx - est_x, ty - est_y
+        elif mode == "ring" and ring_locked:
+            # SCALE-IMMUNE RING.
+            #
+            # We cannot know or set where the cursor is: only relative motion can be emitted,
+            # and the game scales it by its own mouse sensitivity. Four attempts to pin the ring
+            # to screen centre failed on exactly that.
+            #
+            # What we CAN do is undo our own motion exactly, because whatever scaling applies on
+            # the way out applies identically on the way back. So the ring is tracked purely as
+            # an OFFSET from wherever the cursor was resting:
+            #
+            #   want_*  the offset we want right now, as a float
+            #   sent_*  the integer total we have actually emitted
+            #
+            # Each tick we emit round(want) - sent, so `sent` always equals round(want). When
+            # the stick returns to rest want goes to 0, therefore sent goes to 0, and the cursor
+            # lands back precisely where it started. Rounding cannot accumulate, which is what
+            # made the earlier offset attempt drift.
+            tx = lx * radius
+            ty = ly * radius
+            dx, dy = tx - want_x, ty - want_y
             dist = (dx * dx + dy * dy) ** 0.5
-            if dist > 0.5:
+            if dist > 0.01:
                 if dist > REGION_STEP:
                     dx *= REGION_STEP / dist
                     dy *= REGION_STEP / dist
-                ix, iy = int(round(dx)), int(round(dy))
-                if ix or iy:
-                    if ix: mouse.write(e.EV_REL, e.REL_X, ix)
-                    if iy: mouse.write(e.EV_REL, e.REL_Y, iy)
-                    mouse.syn()
-                    est_x = min(max(est_x + ix, 0.0), float(screen_w))
-                    est_y = min(max(est_y + iy, 0.0), float(screen_h))
+                want_x += dx
+                want_y += dy
+                if abs(tx - want_x) < 0.5 and abs(ty - want_y) < 0.5:
+                    want_x, want_y = tx, ty      # settle exactly, so rest is exactly 0
+            nx, ny = int(round(want_x)), int(round(want_y))
+            if nx != sent_x or ny != sent_y:
+                if nx != sent_x: mouse.write(e.EV_REL, e.REL_X, nx - sent_x)
+                if ny != sent_y: mouse.write(e.EV_REL, e.REL_Y, ny - sent_y)
+                mouse.syn()
+                sent_x, sent_y = nx, ny
             # OUTER RING: click only at the limit, so partial deflection aims silently.
             at_ring = (lx * lx + ly * ly) ** 0.5 >= OUTER_RING
             if at_ring != clicking:
@@ -508,6 +557,12 @@ def main():
             run(pads[0], args.index or 1, args.profile, not args.no_grab)
         except KeyboardInterrupt:
             pass
+        except Exception:
+            # Print it rather than dying mutely. A crashed mapper presents as a frozen cursor
+            # and dead buttons, with nothing anywhere to say why.
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+            return 1
         return 0
 
     # Several pads: one child each, so one pad going away cannot take the others down. The
