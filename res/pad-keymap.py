@@ -133,6 +133,10 @@ RING_LOCK_BUTTON = e.BTN_THUMBL
 # immediate.
 REGION_STEP = 50
 
+# Ring movement granularity, in pixels. Every ring delta is exactly this size so that
+# speed-dependent pointer acceleration applies the same factor going out and coming back.
+RING_STEP = 6
+
 # D-pad is an ABS hat on Xbox pads, not buttons, so it is mapped separately.
 DPAD = {
     "torchlight2": {"up": "KEY_5", "down": "KEY_6", "left": "KEY_7", "right": "KEY_8"},
@@ -323,8 +327,7 @@ def run(pad, index, profile, grab):
         radius = CURSOR_RADIUS_OVERRIDE
     # Ring bookkeeping - offsets from the resting cursor, never screen coordinates.
     ring_locked = True      # L3 toggles; see RING_LOCK_BUTTON
-    want_x = want_y = 0.0   # offset we want, float
-    sent_x = sent_y = 0     # integer total actually emitted
+    want_x = want_y = 0     # offset from the ring origin, always a multiple of RING_STEP
 
     while True:
         # Wait for pad events, but never longer than one tick, so cursor motion stays smooth
@@ -345,8 +348,7 @@ def run(pad, index, profile, grab):
                         if ev.value == 1:
                             ring_locked = not ring_locked
                             # Whatever is under the cursor now becomes the centre.
-                            want_x = want_y = 0.0
-                            sent_x = sent_y = 0
+                            want_x = want_y = 0
                             if clicking:
                                 mouse.write(e.EV_KEY, e.BTN_LEFT, 0)
                                 mouse.syn()
@@ -419,8 +421,7 @@ def run(pad, index, profile, grab):
             # The right stick repositions the cursor freely, which means the ring's origin
             # moves with it. Reset the offset bookkeeping so the new resting place becomes
             # the centre - park the cursor on your character and the ring is centred there.
-            want_x = want_y = 0.0
-            sent_x = sent_y = 0
+            want_x = want_y = 0
             manual = True
         elif lx or ly:
             manual = False          # left stick takes control back
@@ -446,24 +447,27 @@ def run(pad, index, profile, grab):
             # the stick returns to rest want goes to 0, therefore sent goes to 0, and the cursor
             # lands back precisely where it started. Rounding cannot accumulate, which is what
             # made the earlier offset attempt drift.
-            tx = lx * radius
-            ty = ly * radius
-            dx, dy = tx - want_x, ty - want_y
-            dist = (dx * dx + dy * dy) ** 0.5
-            if dist > 0.01:
-                if dist > REGION_STEP:
-                    dx *= REGION_STEP / dist
-                    dy *= REGION_STEP / dist
+            # CONSTANT-SIZE STEPS.
+            #
+            # Every delta emitted here is exactly +/-RING_STEP on an axis, never a variable
+            # remainder. That matters because pointer acceleration is SPEED dependent: a 50px
+            # delta and a 3px delta are scaled by different factors, so an outward path made of
+            # big steps did not cancel against a return made of small ones - the ring drifted
+            # away from where it was locked. With one constant step size the factor is the same
+            # in both directions, so the round trip cancels under any acceleration curve.
+            #
+            # The cost is that ring positions are quantised to RING_STEP pixels, which at 6px
+            # over an 84px radius is 14 stops per axis - far finer than the stick can be aimed.
+            tx = round(lx * radius / RING_STEP) * RING_STEP
+            ty = round(ly * radius / RING_STEP) * RING_STEP
+            dx = RING_STEP if tx > want_x else (-RING_STEP if tx < want_x else 0)
+            dy = RING_STEP if ty > want_y else (-RING_STEP if ty < want_y else 0)
+            if dx or dy:
+                if dx: mouse.write(e.EV_REL, e.REL_X, dx)
+                if dy: mouse.write(e.EV_REL, e.REL_Y, dy)
+                mouse.syn()
                 want_x += dx
                 want_y += dy
-                if abs(tx - want_x) < 0.5 and abs(ty - want_y) < 0.5:
-                    want_x, want_y = tx, ty      # settle exactly, so rest is exactly 0
-            nx, ny = int(round(want_x)), int(round(want_y))
-            if nx != sent_x or ny != sent_y:
-                if nx != sent_x: mouse.write(e.EV_REL, e.REL_X, nx - sent_x)
-                if ny != sent_y: mouse.write(e.EV_REL, e.REL_Y, ny - sent_y)
-                mouse.syn()
-                sent_x, sent_y = nx, ny
             # OUTER RING: click only at the limit, so partial deflection aims silently.
             at_ring = (lx * lx + ly * ly) ** 0.5 >= OUTER_RING
             if at_ring != clicking:
