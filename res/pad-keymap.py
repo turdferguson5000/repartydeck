@@ -254,27 +254,47 @@ def scale_stick(raw_x, raw_y):
     return out * (raw_x / mag), out * (raw_y / mag)
 
 
-def _wait_for_pad(path, index, timeout=None):
-    """Re-open a pad that went away, without tearing down the virtual device.
+def pad_identity(dev):
+    """A fingerprint that survives the pad being switched off and on again.
 
-    Tries the original node first, then any other real pad, because a wireless pad often comes
-    back on a DIFFERENT event number after the dongle re-enumerates (CLAUDE.md 10e).
+    Node numbers do not survive: a wireless pad routinely comes back as a different
+    /dev/input/eventN after the dongle re-enumerates. The bus ids do survive, and `phys`
+    distinguishes otherwise identical pads because it encodes which dongle port they are on -
+    which matters here, where four identical Xbox pads share one receiver.
+    """
+    info = dev.info
+    return (info.vendor, info.product, dev.name, getattr(dev, "phys", "") or "",
+            getattr(dev, "uniq", "") or "")
+
+
+def _wait_for_pad(path, index, identity, timeout=None):
+    """Re-open THIS pad after it disappears, without tearing down the virtual device.
+
+    Matching is by identity, never "the first gamepad lying around". The earlier version fell
+    back to any pad it could find, which meant a player whose controller blipped could have
+    their mapper re-acquire a NEIGHBOUR's pad - one controller then drove two instances through
+    two virtual devices, which is exactly the "it started controlling multiple games" report.
+
+    A pad that never returns simply leaves this player without input, which is the correct
+    failure: silent for one player beats stolen from another.
     """
     waited = 0.0
     while timeout is None or waited < timeout:
+        # The original node first - most reconnects land back on it.
         try:
             d = evdev.InputDevice(path)
-            if is_gamepad(d):
+            if is_gamepad(d) and pad_identity(d) == identity:
                 return d
             d.close()
         except OSError:
             pass
+        # Otherwise look for the SAME pad on a new node.
         for p in evdev.list_devices():
             try:
                 d = evdev.InputDevice(p)
             except OSError:
                 continue
-            if is_gamepad(d):
+            if is_gamepad(d) and pad_identity(d) == identity:
                 return d
             d.close()
         time.sleep(2.0)
@@ -282,6 +302,7 @@ def _wait_for_pad(path, index, timeout=None):
     return None
 
 def run(pad, index, profile, grab):
+    identity = pad_identity(pad)
     mapping = PROFILES[profile]
     dpad = DPAD[profile]
     kb, mouse = make_virtual(index, profile)
@@ -397,7 +418,7 @@ def run(pad, index, profile, grab):
                     # launch fails. So keep the virtual device alive and wait for the pad.
                     log(f"[pad-keymap] player {index}: pad gone, keeping {node} alive "
                         f"and waiting for it to return")
-                    pad = _wait_for_pad(pad.path, index)
+                    pad = _wait_for_pad(pad.path, index, identity)
                     if pad is None:
                         return
                     if grab:
