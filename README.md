@@ -92,7 +92,7 @@ Debugging four sandboxed games at once with no output is miserable, so:
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md). Short version: importing Nucleus handlers from splitscreen.me,
+See [docs/ROADMAP.md](docs/ROADMAP.md). Short version: importing Nucleus handlers from splitscreen.me,
 a search tool for finding a game's handler, better artwork, and full controller navigation of
 the UI itself.
 

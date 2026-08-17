@@ -72,6 +72,11 @@ const BUNDLE: &[(&str, &str)] = &[
     // resources
     ("res/splitscreen_kwin.js", "res/splitscreen_kwin.js"),
     ("res/splitscreen_kwin_vertical.js", "res/splitscreen_kwin_vertical.js"),
+    // Per-player controller helpers. These are looked up at runtime through PATH_RES, so
+    // leaving them out of the build output does not fail loudly, it just means every launch
+    // quietly runs without pad translation or the mirror.
+    ("res/pad-keymap.py", "res/pad-keymap.py"),
+    ("res/pad-mirror.py", "res/pad-mirror.py"),
 ];
 
 

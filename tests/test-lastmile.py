@@ -66,7 +66,7 @@ def main():
     # cursor centred in relative mode, so absolute position never changes even while motion is
     # being delivered - the first version of this test measured that and wrongly reported
     # failure.
-    probe = "/tmp/pd-xprobe.py"
+    probe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pd-xprobe.py")
 
     pad = UInput({e.EV_KEY: BUTTONS, e.EV_ABS: AXES}, name="Fake Xbox Pad 1",
                  vendor=0x045E, product=0x028E, version=0x110)
