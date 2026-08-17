@@ -251,6 +251,44 @@ fn start_input_watch() {
     });
 }
 
+/// The receiver slot (USB interface) a pad hangs off, e.g. ".../usb3/3-3/3-3:1.4".
+///
+/// This is the only durable name a pad has here. Four controllers on one Xbox 360 wireless
+/// receiver report the same name, the same 045e:02a1, the same phys and an EMPTY uniq, and
+/// their /dev/input/eventN is recycled whenever one powers off - so neither the identity fields
+/// nor the node number can tell them apart. The interface they hang off can.
+///
+/// Returns None for virtual devices: a uinput node lives under /sys/devices/virtual and belongs
+/// to no slot, so it can never be mistaken for a pad.
+fn slot_key(path: &str) -> Option<String> {
+    let node = Path::new(path).file_name()?.to_str()?;
+    let real = std::fs::canonicalize(format!("/sys/class/input/{node}/device")).ok()?;
+    let s = real.to_str()?;
+    if s.starts_with("/sys/devices/virtual") {
+        return None;
+    }
+    // .../usb3/3-3/3-3:1.4/input/input264 -> everything above the input device itself
+    Some(match s.find("/input/input") {
+        Some(i) => s[..i].to_string(),
+        None => s.to_string(),
+    })
+}
+
+/// The evdev node currently sitting on a given slot.
+fn node_for_slot(key: &str) -> Option<String> {
+    let mut found: Vec<String> = std::fs::read_dir("/dev/input")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|n| n.starts_with("event"))
+        .map(|n| format!("/dev/input/{n}"))
+        .filter(|p| slot_key(p).as_deref() == Some(key))
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
 /// Legacy /dev/input/jsN nodes belonging to the same physical device as an evdev node.
 fn js_siblings(evdev_path: &str) -> Vec<String> {
     let name = std::path::Path::new(evdev_path)
@@ -285,12 +323,20 @@ fn spawn_pad_helper(
     i: usize,
     what: &str,
 ) -> Option<(String, std::process::Child)> {
+    // Helper stderr goes to a file, one per player. It must not be INHERITED (that keeps the
+    // parent's pipe open after we exit, so a caller reading our output waits forever for EOF)
+    // and it must not be discarded either: the helper reports every pad loss and re-acquisition
+    // there, which is the only record of what a player's controller did during a session.
+    let log_dir = PATH_PARTY.join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let errlog = std::fs::File::create(log_dir.join(format!("{what}-{i}.log")))
+        .map(std::process::Stdio::from)
+        .unwrap_or_else(|_| std::process::Stdio::null());
+
     let mut child = Command::new(bin)
         .args(argv)
         .stdout(std::process::Stdio::piped())
-        // Inheriting stderr would keep the parent's pipe open after we exit, so a caller
-        // reading our output waits for EOF that never comes.
-        .stderr(std::process::Stdio::null())
+        .stderr(errlog)
         .spawn()
         .map_err(|e| dlog(&format!("{what}: failed to start for instance {i}: {e}")))
         .ok()?;
@@ -400,6 +446,32 @@ pub fn launch_cmds(
     let mut mirror_nodes: Vec<String> = Vec::new();
     {
         sweep_orphan_pad_keymaps();
+
+        // Resolve every pad to its slot BEFORE starting a single helper, then re-derive the
+        // node from that slot as each helper is launched.
+        //
+        // Device paths cannot be captured once and reused here. Each helper creates a uinput
+        // device, and the kernel hands it the LOWEST free event number - which, if a pad
+        // powered off during launch, is very likely the number that pad just vacated and that a
+        // later player's assignment still points at. Seen on 2026-08-16: a controller was
+        // restarted mid-launch, player 1's mirror was created onto the freed /dev/input/event29,
+        // and player 3 - whose pad had been event29 - then mirrored player 1's MIRROR:
+        //
+        //     allow ... "PD Pad 3 (PD Pad 1 (Xbox 360 Wireless Receiver))"
+        //
+        // Slots are immune to that: they are USB interfaces, they are computed before anything
+        // is created, and a uinput device has none (slot_key returns None for it).
+        let pad_slots: Vec<Option<String>> = instances
+            .iter()
+            .map(|inst| {
+                inst.devices
+                    .iter()
+                    .map(|&d| &input_devices[d])
+                    .find(|d| d.device_type == DeviceType::Gamepad)
+                    .and_then(|p| slot_key(&p.path))
+            })
+            .collect();
+
         for (i, instance) in instances.iter().enumerate() {
             let pad = instance
                 .devices
@@ -414,6 +486,29 @@ pub fn launch_cmds(
                 mirror_nodes.push(String::new());
                 continue;
             };
+            // Where that pad is RIGHT NOW, not where it was when the list was built.
+            let slot = pad_slots[i].clone().unwrap_or_default();
+            let pad_path = match node_for_slot(&slot) {
+                Some(p) => {
+                    if p != pad.path {
+                        dlog(&format!(
+                            "instance {i}: pad moved {} -> {p} since assignment (slot {slot})",
+                            pad.path
+                        ));
+                    }
+                    p
+                }
+                None => {
+                    dlog(&format!(
+                        "instance {i}: pad {} is gone (slot {slot:?}); no helper started",
+                        pad.path
+                    ));
+                    keymap_nodes.push(String::new());
+                    mirror_nodes.push(String::new());
+                    continue;
+                }
+            };
+            let pad = &DeviceInfo { path: pad_path, ..pad.clone() };
             let translate = !h.pad_keymap.is_empty();
             let (bin, what): (&Path, &str) = if translate {
                 (&BIN_PAD_KEYMAP, "pad-keymap")
@@ -424,6 +519,9 @@ pub fn launch_cmds(
             let mut argv: Vec<&str> = vec!["--device", &pad.path, "--index", &index];
             if translate {
                 argv.extend(["--profile", &h.pad_keymap]);
+            } else if !slot.is_empty() {
+                // The mirror re-acquires by slot when the pad power-cycles mid-session.
+                argv.extend(["--slot", &slot]);
             }
             argv.push("--print-node");
 

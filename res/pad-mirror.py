@@ -65,14 +65,19 @@ def log(msg):
 def slot_key(path):
     """The receiver slot / USB interface a pad is plugged into.
 
-    Returns something like 'usb3/3-3/3-3:1.4'. This is the only field that stays put when a
-    wireless pad power-cycles: the input device below it is destroyed and recreated, but the
-    interface it hangs off does not move.
+    Returns something like '/sys/devices/.../usb3/3-3/3-3:1.4'. This is the only field that
+    stays put when a wireless pad power-cycles: the input device below it is destroyed and
+    recreated, but the interface it hangs off does not move.
+
+    None for a virtual device - a uinput node lives under /sys/devices/virtual and belongs to no
+    slot, which is what makes it impossible to confuse with a pad.
     """
     node = os.path.basename(path)
     try:
         real = os.path.realpath(f"/sys/class/input/{node}/device")
     except OSError:
+        return None
+    if real.startswith("/sys/devices/virtual"):
         return None
     # .../usb3/3-3/3-3:1.4/input/input264  ->  everything above the input device itself
     marker = "/input/input"
@@ -95,6 +100,20 @@ def find_by_slot(key):
 
 def open_pad(path):
     dev = evdev.InputDevice(path)
+    # NEVER mirror another mirror.
+    #
+    # /dev/input node numbers are recycled: a pad that powers off during launch frees its
+    # number, and the very next uinput device the kernel creates - another player's mirror -
+    # is handed exactly that number. A later player whose assignment still names it then
+    # chains onto it. Observed on 2026-08-16 as a device literally called
+    # "PD Pad 3 (PD Pad 1 (Xbox 360 Wireless Receiver))": one player's controller feeding
+    # another player's game, and the real pad 3 driving nothing.
+    #
+    # PartyDeck now resolves pads by slot so this should not be reachable, but the cost of
+    # being wrong is a player silently playing on someone else's stick, so it is checked here
+    # too. A physical pad always has a slot; a uinput device never does.
+    if slot_key(path) is None:
+        raise OSError(f"{path} is a virtual device ({dev.name}), not a controller")
     # Exclusive: the game must not also be able to read the raw pad, or a player's input would
     # arrive twice and (before the whitelist) in the wrong instances.
     dev.grab()
@@ -122,17 +141,24 @@ def build_mirror(src, index):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", required=True)
+    ap.add_argument("--slot", default="",
+                    help="receiver slot to (re-)acquire the pad from; overrides --device")
     ap.add_argument("--index", type=int, default=1)
     ap.add_argument("--print-node", action="store_true")
     args = ap.parse_args()
 
-    key = slot_key(args.device)
-    log(f"pad {args.device} slot={key}")
+    # The slot wins over the path. PartyDeck computes it before starting any helper, so it
+    # still points at the right controller even if node numbers were shuffled in between.
+    key = args.slot or slot_key(args.device)
+    path = (find_by_slot(key) if key else None) or args.device
+    if path != args.device:
+        log(f"pad moved {args.device} -> {path} before start (slot {key})")
+    log(f"pad {path} slot={key}")
 
     try:
-        src = open_pad(args.device)
+        src = open_pad(path)
     except OSError as ex:
-        log(f"cannot open {args.device}: {ex}")
+        log(f"cannot open {path}: {ex}")
         return 1
 
     ui = build_mirror(src, args.index)
@@ -181,8 +207,30 @@ def main():
                     continue
                 log(f"pad back on {path}, resumed on {node}")
         except Exception:
+            # Do NOT exit. Ending the process destroys the uinput node, and the sandbox's
+            # bind-mount of it can never be replaced - that player would be finished for the
+            # session, which is the exact failure this script exists to prevent. Log it, drop
+            # the source, and go back to waiting for the slot.
             traceback.print_exc(file=sys.stderr)
-            return 1
+            log(f"unexpected error; mirror {node} stays up, re-acquiring slot {key}")
+            try:
+                src.ungrab()
+            except Exception:
+                pass
+            try:
+                src.close()
+            except Exception:
+                pass
+            src = None
+            while src is None:
+                time.sleep(1.0)
+                path = find_by_slot(key)
+                if not path:
+                    continue
+                try:
+                    src = open_pad(path)
+                except OSError:
+                    src = None
 
 
 if __name__ == "__main__":
