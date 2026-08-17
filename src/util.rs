@@ -1,5 +1,14 @@
 use crate::paths::{PATH_HOME, PATH_PARTY};
 
+/// This project's GitHub repo, as `owner/name`.
+///
+/// Defined once because it is easy to leave a fork pointing at its parent, and the version
+/// check is the place where that actually hurts: our version numbering restarted at 0.0.1,
+/// so checking upstream's releases would report an update on every launch and send people to
+/// a different project's download page.
+pub const REPO_SLUG: &str = "REPO_OWNER_PLACEHOLDER/repartydeck";
+pub const REPO_URL: &str = "https://github.com/REPO_OWNER_PLACEHOLDER/repartydeck";
+
 use dialog::{Choice, DialogBox};
 use rfd::FileDialog;
 use std::error::Error;
@@ -196,8 +205,8 @@ pub fn clear_tmp() -> Result<(), Box<dyn Error>> {
 pub fn check_for_partydeck_update() -> bool {
     // Try to get the latest release tag from GitHub
     if let Ok(client) = reqwest::blocking::Client::new()
-        .get("https://api.github.com/repos/wunnr/partydeck/releases/latest")
-        .header("User-Agent", "partydeck")
+        .get(format!("https://api.github.com/repos/{REPO_SLUG}/releases/latest"))
+        .header("User-Agent", "repartydeck")
         .send()
     {
         if let Ok(release) = client.json::<serde_json::Value>() {

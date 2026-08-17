@@ -227,7 +227,7 @@ fn main() -> eframe::Result {
     // timeout). The title says so, and the version is deliberately absurd, because an
     // upstream "update" would silently replace all of it.
     eframe::run_native(
-        "PartyDeck [tim custom dont update]",
+        "RePartyDeck",
         options,
         Box::new(|cc| {
             // This gives us image support:

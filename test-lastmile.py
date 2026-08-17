@@ -27,7 +27,7 @@ from evdev import UInput, AbsInfo, ecodes as e
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 KEYMAP = os.path.join(HERE, "pad-keymap.py")
-GAMESCOPE = "/var/home/user/partydeck/bin/gamescope-kbm"
+GAMESCOPE = os.environ.get("REPARTYDECK_HOME", os.path.expanduser("~/repartydeck")) + "/bin/gamescope-kbm"
 VERBOSE = "-v" in sys.argv
 results = []
 

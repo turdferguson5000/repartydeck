@@ -30,7 +30,7 @@ import time
 import evdev
 from evdev import UInput, AbsInfo, ecodes as e
 
-PARTYDECK = "/var/home/user/partydeck/partydeck"
+PARTYDECK = os.environ.get("REPARTYDECK_HOME", os.path.expanduser("~/repartydeck")) + "/repartydeck"
 HANDLERS = os.path.expanduser("~/.local/share/partydeck/handlers")
 TEST_HANDLER = "ZZTestFlow"
 VERBOSE = "-v" in sys.argv

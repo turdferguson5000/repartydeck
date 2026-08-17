@@ -58,11 +58,26 @@ impl PartyApp {
                 self.cur_page = MenuPage::Profiles;
             }
 
-            if ui.button("🎮 🔄").clicked() {
-                self.instances.clear();
+            // No controller refresh button: the device list keeps itself current (see
+            // PartyApp::poll_input_devices). This is a read-out, not a control. It stays
+            // clickable only as a manual override for the case where a device is present but
+            // misbehaving, and unlike the old button it does NOT clear the instance list -
+            // losing a four-player setup because one battery died was the whole problem.
+            let pads = self
+                .input_devices
+                .iter()
+                .filter(|d| d.device_type() == DeviceType::Gamepad)
+                .count();
+            if ui
+                .button(format!("🎮 {pads}"))
+                .on_hover_text("Controllers detected. Added and removed automatically; click to force a rescan.")
+                .clicked()
+            {
                 self.input_devices = scan_input_devices(&self.options.pad_filter_type);
+                self.input_fingerprint = String::new(); // make the next poll re-map assignments
             }
-            
+
+
             if ui.button("🖵 🔄").clicked() {
                 self.instances.clear();
                 self.monitors = get_monitors_errorless();
@@ -81,7 +96,7 @@ impl PartyApp {
                     },
                     false => format!("(Frozen) v{}", env!("CARGO_PKG_VERSION")),
                 };
-                ui.hyperlink_to(version_label, "https://github.com/wunnr/partydeck/releases");
+                ui.hyperlink_to(version_label, format!("{}/releases", crate::util::REPO_URL));
                 ui.add(egui::Separator::default().vertical());
                 ui.hyperlink_to("⮋", "https://drive.proton.me/urls/D9HBKM18YR#zG8XC8yVy9WL")
                     .on_hover_text("Download Game Handlers");
@@ -89,10 +104,10 @@ impl PartyApp {
                     .on_hover_text("Support PartyDeck Development");
                 ui.hyperlink_to(
                     "🖹",
-                    "https://github.com/wunnr/partydeck/tree/main?tab=License-2-ov-file",
+                    format!("{}/blob/main/LICENSE", crate::util::REPO_URL),
                 )
                 .on_hover_text("Third-Party Licenses");
-                ui.hyperlink_to("", "https://github.com/wunnr/partydeck")
+                ui.hyperlink_to("", crate::util::REPO_URL)
                     .on_hover_text("GitHub");
             });
         });

@@ -66,13 +66,13 @@ fired every time. Now polls to completion, showing elapsed time after 20 s.
 
 ```sh
 distrobox enter pdbuild -- bash -lc 'cd ~/pd-build && cargo build --release'
-cp -f target/release/partydeck            /var/home/user/partydeck/partydeck
-cp -f res/splitscreen_kwin*.js            /var/home/user/partydeck/res/
+cp -f target/release/partydeck            $REPARTYDECK_HOME/partydeck
+cp -f res/splitscreen_kwin*.js            $REPARTYDECK_HOME/res/
 ```
 
 Both the binary **and** `res/` must be copied — the KWin scripts carry half the fix.
 
-Stock binary preserved at `/var/home/user/partydeck/partydeck.stock`.
+Stock binary preserved at `$REPARTYDECK_HOME/partydeck.stock`.
 
 ## Gotcha when testing
 

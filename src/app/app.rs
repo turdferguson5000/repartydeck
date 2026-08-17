@@ -63,6 +63,31 @@ pub struct PartyApp {
     pub loading_since: Option<std::time::Instant>,
     #[allow(dead_code)]
     pub task: Option<std::thread::JoinHandle<()>>,
+
+    /// What /dev/input looked like at the last check, and when that was.
+    ///
+    /// Controllers are picked up on their own, so there is nothing to press when a pad is
+    /// turned on late or a battery dies mid-setup. Wireless pads make this constant rather
+    /// than rare: an Xbox 360 pad powers itself off when idle, and waking it destroys and
+    /// recreates its kernel device, so node numbers churn even when nobody touches anything.
+    pub input_fingerprint: String,
+    pub input_checked: std::time::Instant,
+}
+
+/// A cheap summary of what is plugged in, used to notice changes without rescanning.
+///
+/// Just the node names: opening every device to compare properly would be far too expensive
+/// to run in a UI frame, and a device appearing or disappearing always changes this string.
+fn input_fingerprint() -> String {
+    let mut names: Vec<String> = std::fs::read_dir("/dev/input")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|n| n.starts_with("event"))
+        .collect();
+    names.sort();
+    names.join(",")
 }
 
 macro_rules! cur_handler {
@@ -106,6 +131,8 @@ impl PartyApp {
             loading_base_msg: None,
             loading_since: None,
             task: None,
+            input_fingerprint: input_fingerprint(),
+            input_checked: std::time::Instant::now(),
         };
 
         if app.options.check_for_updates {
@@ -131,6 +158,8 @@ impl eframe::App for PartyApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_input_devices();
+
         egui::TopBottomPanel::top("menu_nav_panel").show(ctx, |ui| {
             if self.task.is_some() {
                 ui.disable();
@@ -251,6 +280,54 @@ impl PartyApp {
 
     pub fn is_lite(&self) -> bool {
         self.handler_lite.is_some()
+    }
+
+    /// Pick up controllers as they come and go, without anyone pressing anything.
+    ///
+    /// Assignments are kept across the rescan by matching on device PATH rather than by
+    /// position in the list. Rescanning renumbers everything, so re-using the old indices
+    /// would quietly move player 2's pad onto player 3, and dropping the assignments
+    /// wholesale would wipe a four-player setup because somebody's battery died.
+    ///
+    /// A device that has genuinely gone is removed from whatever instance held it. A pad that
+    /// merely moved to another node keeps its slot, since paths are compared after the rescan
+    /// has resolved them.
+    fn poll_input_devices(&mut self) {
+        if self.task.is_some() {
+            return; // a rescan mid-launch would fight whatever the task is doing
+        }
+        if self.input_checked.elapsed() < std::time::Duration::from_millis(1000) {
+            return;
+        }
+        self.input_checked = std::time::Instant::now();
+        let now = input_fingerprint();
+        if now == self.input_fingerprint {
+            return;
+        }
+        self.input_fingerprint = now;
+
+        let old_paths: Vec<String> = self
+            .input_devices
+            .iter()
+            .map(|d| d.info().path.clone())
+            .collect();
+        self.input_devices = scan_input_devices(&self.options.pad_filter_type);
+        let new_paths: Vec<String> = self
+            .input_devices
+            .iter()
+            .map(|d| d.info().path.clone())
+            .collect();
+
+        for inst in &mut self.instances {
+            inst.devices = inst
+                .devices
+                .iter()
+                .filter_map(|&old| old_paths.get(old))
+                .filter_map(|path| new_paths.iter().position(|p| p == path))
+                .collect();
+        }
+        self.instance_add_dev = None; // its index refers to the list we just replaced
+        println!("[partydeck] input devices changed; rescanned ({} found)", self.input_devices.len());
     }
 
     fn handle_gamepad_gui(&mut self, raw_input: &mut egui::RawInput) {
