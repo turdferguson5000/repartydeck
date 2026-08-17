@@ -2,7 +2,7 @@ use crate::app::PadFilterType;
 
 use evdev::*;
 
-#[derive(Clone, PartialEq, Copy)]
+#[derive(Clone, PartialEq, Copy, Debug)]
 pub enum DeviceType {
     Gamepad,
     Keyboard,

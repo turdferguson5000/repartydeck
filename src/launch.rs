@@ -140,6 +140,134 @@ pub fn stop_pad_keymaps() {
 ///
 /// Without this, one failed launch leaves the pads grabbed forever and the next session cannot
 /// assign controllers at all - which looks like "the controller appears then disappears".
+/// Write a diagnostic line to stdout AND to a file that survives the session.
+///
+/// The journal is fine while something is running, but a launch that dies takes its context
+/// with it and PartyDeck's own stdout is easy to lose. This lands in a known place so the whole
+/// launch can be reconstructed afterwards: what devices existed, which ones each instance was
+/// allowed, and what was actually handed to bwrap.
+pub fn dlog(line: &str) {
+    println!("[partydeck] {line}");
+    use std::io::Write;
+    let dir = PATH_PARTY.join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("last-launch.log"))
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Start a fresh diagnostic log for this launch.
+fn dlog_start(h: &Handler) {
+    let dir = PATH_PARTY.join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::remove_file(dir.join("last-launch.log"));
+    dlog(&format!("=== launch: {} ===", h.name));
+    dlog(&format!("handler: exec={:?} runtime={:?} goldberg={} keymap={:?} appid={:?}",
+                  h.exec, h.runtime, h.use_goldberg, h.pad_keymap, h.steam_appid));
+    dlog(&format!("gameroot: {:?}", h.get_game_rootpath()));
+    start_input_watch();
+}
+
+/// Who a /dev/input node belongs to, in a form that survives renumbering.
+///
+/// The node NAME is not an identity - a wireless pad that power-cycles comes back as a
+/// different eventN. Vendor/product plus the USB path (`phys`) is what actually stays put, so
+/// a device that disappears can be matched against the one that reappears.
+fn device_identity(node: &str) -> String {
+    let d = format!("/sys/class/input/{node}/device");
+    let rd = |f: &str| {
+        std::fs::read_to_string(format!("{d}/{f}"))
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    format!(
+        "{}:{} {:?} phys={}",
+        rd("id/vendor"),
+        rd("id/product"),
+        rd("name"),
+        rd("phys")
+    )
+}
+
+fn input_snapshot() -> std::collections::BTreeMap<String, String> {
+    let mut m = std::collections::BTreeMap::new();
+    let Ok(rd) = std::fs::read_dir("/dev/input") else {
+        return m;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with("event") || name.starts_with("js") {
+            let id = device_identity(&name);
+            m.insert(name, id);
+        }
+    }
+    m
+}
+
+static INPUT_WATCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Log every input hotplug for as long as PartyDeck runs.
+///
+/// The sandbox is a WHITELIST, so a pad that power-cycles mid-session comes back on a NEW
+/// /dev/input node that is bound into no running instance - that player silently loses input
+/// for the rest of the session and nothing anywhere records why. (The same event used to
+/// produce the opposite symptom: before the whitelist the new node was in nobody's blacklist,
+/// so one pad drove every instance at once.)
+///
+/// It has to be watched live because the evidence does not survive: the kernel logs a device
+/// arriving but not one leaving, and /dev/input only ever shows the present. `xpad` runs with
+/// `auto_poweroff=Y` and these are wireless pads with their own idle timeout, so departures are
+/// routine rather than exotic.
+fn start_input_watch() {
+    use std::sync::atomic::Ordering;
+    if INPUT_WATCH.swap(true, Ordering::SeqCst) {
+        return; // one watcher per process, not one per launch
+    }
+    std::thread::spawn(|| {
+        let t0 = std::time::Instant::now();
+        let mut prev = input_snapshot();
+        dlog("--- input hotplug watch started (logs every device add/remove from here on) ---");
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let now = input_snapshot();
+            let secs = t0.elapsed().as_secs();
+            for (node, id) in prev.iter() {
+                if !now.contains_key(node) {
+                    dlog(&format!("[hotplug t+{secs}s] GONE /dev/input/{node}  {id}"));
+                }
+            }
+            for (node, id) in now.iter() {
+                if !prev.contains_key(node) {
+                    dlog(&format!("[hotplug t+{secs}s] NEW  /dev/input/{node}  {id}"));
+                }
+            }
+            prev = now;
+        }
+    });
+}
+
+/// Legacy /dev/input/jsN nodes belonging to the same physical device as an evdev node.
+fn js_siblings(evdev_path: &str) -> Vec<String> {
+    let name = std::path::Path::new(evdev_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let dir = format!("/sys/class/input/{}/device", name);
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|n| n.starts_with("js"))
+        .map(|n| format!("/dev/input/{}", n))
+        .collect()
+}
+
 fn sweep_orphan_pad_keymaps() {
     let out = Command::new("pkill")
         // Leading slash matters: a bare "pad-keymap.py" pattern also matches
@@ -173,6 +301,21 @@ pub fn launch_cmds(
     // One device per player, not two: a sandboxed SDL only scans /dev/input/event0..31, and on
     // a machine where those slots are full the second device lands above event31 where nothing
     // can see it.
+    dlog_start(h);
+    dlog(&format!("instances: {}", instances.len()));
+    dlog("--- input devices PartyDeck can see ---");
+    for (d, dev) in input_devices.iter().enumerate() {
+        dlog(&format!(
+            "  [{d}] {:?} type={:?} enabled={} exists={} hidraw={:?} js={:?}",
+            dev.path, dev.device_type, dev.enabled,
+            std::path::Path::new(&dev.path).exists(),
+            dev.hidraw_paths, js_siblings(&dev.path)));
+    }
+    for (i, inst) in instances.iter().enumerate() {
+        dlog(&format!("  instance {i}: profile={:?} monitor={} res={}x{} devices={:?}",
+                      inst.profname, inst.monitor, inst.width, inst.height, inst.devices));
+    }
+
     let mut keymap_nodes: Vec<String> = Vec::new();
     if !h.pad_keymap.is_empty() {
         sweep_orphan_pad_keymaps();
@@ -240,7 +383,8 @@ pub fn launch_cmds(
                         let _ = child.wait();
                         keymap_nodes.push(String::new());
                     } else {
-                        println!("[partydeck] pad-keymap: instance {i} -> {node}");
+                        dlog(&format!("pad-keymap: instance {i} -> {node} (exists={})",
+                                      std::path::Path::new(&node).exists()));
                         keymap_nodes.push(node);
                         if let Ok(mut kids) = KEYMAP_CHILDREN.lock() {
                             kids.push(child);
@@ -480,23 +624,76 @@ pub fn launch_cmds(
         cmd.arg("--die-with-parent");
         cmd.args(["--dev-bind", "/", "/"]);
         cmd.args(["--tmpfs", "/tmp"]);
-        // Mask the other players' pad-keymap devices. bwrap uses --dev-bind / /, so every
-        // virtual node is visible inside every sandbox unless it is explicitly covered.
-        for (n, node) in keymap_nodes.iter().enumerate() {
-            if n != i && !node.is_empty() {
-                cmd.args(["--bind", "/dev/null", node]);
+        // DEVICE ISOLATION BY WHITELIST.
+        //
+        // This used to be a blacklist: bind /dev/null over the OTHER players' nodes. That is
+        // unsafe by default, and it broke exactly as you would expect - the sandbox shares the
+        // host's /dev, the masks are computed once at launch by path, and a controller that
+        // disconnects and reconnects comes back as a NEW node (event16 -> event30) which was
+        // never masked in any instance. One pad then drove every game at once.
+        //
+        // Now /dev/input is a fresh tmpfs and only this player's devices are bound back in, so
+        // anything hotplugged later is invisible until PartyDeck is told about it. Silence for
+        // one player is a far better failure than input bleeding into everyone else's game.
+        //
+        // gamescope is NOT affected: it runs outside this sandbox and opened its
+        // --libinput-hold-dev devices before bwrap started. This governs what the GAME sees.
+        cmd.args(["--tmpfs", "/dev/input"]);
+
+        let mut allow: Vec<String> = Vec::new();
+        for &d in &instance.devices {
+            if let Some(dev) = input_devices.get(d) {
+                if !dev.enabled {
+                    continue;
+                }
+                allow.push(dev.path.clone());
+                // Legacy joystick nodes live beside the evdev one. SDL2 prefers evdev, but
+                // older titles still open /dev/input/jsN, and under a tmpfs it would simply
+                // not exist.
+                allow.extend(js_siblings(&dev.path));
             }
         }
-        // Mask out any gamepads that aren't this player's
+        // This player's translated pad device, if the handler uses one.
+        if let Some(node) = keymap_nodes.get(i).filter(|n| !n.is_empty()) {
+            allow.push(node.clone());
+        }
+
+        for path in &allow {
+            if std::path::Path::new(path).exists() {
+                cmd.args(["--dev-bind", path, path]);
+            }
+        }
+        dlog(&format!("--- instance {i}: /dev/input whitelist ---"));
+        for pth in &allow {
+            let exists = std::path::Path::new(pth).exists();
+            // The identity, not just the node name: if this device power-cycles mid-session the
+            // hotplug watch reports the NEW node, and only the identity ties the two together.
+            let node = std::path::Path::new(pth)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            dlog(&format!("    allow {pth} exists={exists}{}  {}",
+                          if exists { "" } else { "   <-- WILL NOT BE BOUND" },
+                          if exists { device_identity(node) } else { String::new() }));
+        }
+        // Everything deliberately excluded, so a missing-input report can be checked against it.
         for (d, dev) in input_devices.iter().enumerate() {
-            if !dev.enabled
-                || (!instance.devices.contains(&d) && dev.device_type == DeviceType::Gamepad)
-            {
-                cmd.args(["--bind", "/dev/null", &dev.path]);
-                // Wine's winebus reads controllers via /dev/hidraw* when
-                // hidraw is exposed, so masking only the evdev node leaks
-                // input to every instance.
-                if h.enable_hidraw {
+            if !instance.devices.contains(&d) {
+                dlog(&format!("    deny  {} ({:?})", dev.path, dev.device_type));
+            }
+        }
+        for (n, node) in keymap_nodes.iter().enumerate() {
+            if n != i && !node.is_empty() {
+                dlog(&format!("    deny  {node} (player {n} keymap device)"));
+            }
+        }
+
+        // hidraw is NOT under /dev/input, so it still needs masking rather than whitelisting.
+        // Wine's winebus reads controllers through it when exposed, and leaving it open leaks
+        // input to every instance.
+        if h.enable_hidraw {
+            for (d, dev) in input_devices.iter().enumerate() {
+                if !instance.devices.contains(&d) {
                     for hp in &dev.hidraw_paths {
                         cmd.args(["--bind", "/dev/null", hp]);
                     }

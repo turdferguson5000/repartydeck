@@ -294,8 +294,11 @@ def _wait_for_pad(path, index, identity, timeout=None):
                 d = evdev.InputDevice(p)
             except OSError:
                 continue
-            if is_gamepad(d) and pad_identity(d) == identity:
-                return d
+            if is_gamepad(d):
+                if pad_identity(d) == identity:
+                    return d
+                print(f"[pad-keymap]   ignoring {p} ({d.name}) - different pad, not stealing it",
+                      file=sys.stderr, flush=True)
             d.close()
         time.sleep(2.0)
         waited += 2.0
@@ -321,6 +324,14 @@ def run(pad, index, profile, grab):
         print(msg, file=sys.stderr if PRINT_NODE else sys.stdout, flush=True)
 
     log(f"[pad-keymap] player {index}: {pad.name} ({pad.path}) -> profile '{profile}'")
+    log(f"[pad-keymap]   identity: vendor={pad.info.vendor:#06x} product={pad.info.product:#06x} "
+        f"phys={getattr(pad, 'phys', '') or '-'} uniq={getattr(pad, 'uniq', '') or '-'}")
+    try:
+        caps = pad.capabilities(verbose=False)
+        log(f"[pad-keymap]   pad axes: {[a for a, _ in caps.get(e.EV_ABS, [])]}")
+        log(f"[pad-keymap]   pad buttons: {len(caps.get(e.EV_KEY, []))}")
+    except Exception as ex:
+        log(f"[pad-keymap]   could not read pad capabilities: {ex}")
     warn = "  <-- ABOVE event31, GAME WILL NOT SEE IT" if _event_num(node) > 31 else ""
     log(f"[pad-keymap]   created: PD Keymap {index} at {node}{warn}")
 
@@ -416,8 +427,10 @@ def run(pad, index, profile, grab):
                     # later instance can start well after a blip - if the device vanished,
                     # gamescope dies with "Invalid path /dev/input/eventN" and the whole
                     # launch fails. So keep the virtual device alive and wait for the pad.
-                    log(f"[pad-keymap] player {index}: pad gone, keeping {node} alive "
-                        f"and waiting for it to return")
+                    log(f"[pad-keymap] player {index}: pad GONE (was {pad.path}); keeping "
+                        f"{node} alive and waiting for the SAME pad "
+                        f"(vendor={identity[0]:#06x} product={identity[1]:#06x} "
+                        f"phys={identity[3] or '-'})")
                     pad = _wait_for_pad(pad.path, index, identity)
                     if pad is None:
                         return
@@ -426,7 +439,8 @@ def run(pad, index, profile, grab):
                             pad.grab()
                         except OSError:
                             pass
-                    log(f"[pad-keymap] player {index}: pad back on {pad.path}")
+                    log(f"[pad-keymap] player {index}: pad BACK on {pad.path} "
+                        f"(same identity confirmed)")
                     continue
                 raise
 
