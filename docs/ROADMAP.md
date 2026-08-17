@@ -47,10 +47,16 @@ work out which of the scripted sections are simple enough to translate rather th
 
 ### Handler search
 
-A built in browser for the splitscreen.me hub. Search by game name, see how many players a
-handler supports, whether it is verified, what the comments say, and install it without
-leaving the app. Right now finding a handler means opening a browser and reading a forum
-thread, and the hub is a single page app so it does not even respond to a normal HTTP fetch.
+Local search landed in v0.9.3. There is a search box above the game list that filters by
+name, which is what makes a library of a few hundred imported handlers usable at all.
+
+Browsing the splitscreen.me hub from inside the app is deliberately not planned. The hub
+is a single page app that does not answer a normal HTTP fetch, so it would mean shipping
+a scraper against someone else's site and keeping it working. Downloading a `.nc` in a
+browser and importing it is a much smaller thing to maintain.
+
+One rough edge: the game list builds a row for every handler rather than only the visible
+ones, so several hundred handlers will feel sluggish when the search box is empty.
 
 ### Full controller navigation
 

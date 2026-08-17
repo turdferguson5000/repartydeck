@@ -148,6 +148,19 @@ impl PartyApp {
                 }
             });
         });
+        // Search. Worth having as soon as the library stops being a handful of games, which
+        // importing from Nucleus does immediately: the hub publishes around 600 handlers, and
+        // scrolling that to find one is hopeless.
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.handler_filter)
+                    .desired_width(150.0)
+                    .hint_text("🔍 Search games"),
+            );
+            if !self.handler_filter.is_empty() && ui.small_button("✖").clicked() {
+                self.handler_filter.clear();
+            }
+        });
         ui.separator();
         egui::ScrollArea::vertical().show(ui, |ui| {
             self.panel_left_game_list(ui);
@@ -223,11 +236,24 @@ impl PartyApp {
     }
 
     pub fn panel_left_game_list(&mut self, ui: &mut Ui) {
+        // Filtering is on the DISPLAY name, and the real index is carried through, because
+        // self.selected_handler indexes self.handlers. Rebuilding a filtered vec and using its
+        // positions would select the wrong game the moment a filter is active.
+        let needle = self.handler_filter.to_ascii_lowercase();
+        let needle = needle.trim();
+        let mut shown = 0usize;
+
         for i in 0..self.handlers.len() {
             // Skip if index is out of bounds to catch for removing/rescanning handlers
             if i >= self.handlers.len() {
                 return;
             }
+            if !needle.is_empty()
+                && !self.handlers[i].display().to_ascii_lowercase().contains(needle)
+            {
+                continue;
+            }
+            shown += 1;
 
             ui.horizontal(|ui| {
                 ui.add(
@@ -250,6 +276,12 @@ impl PartyApp {
 
                 Popup::context_menu(&btn).show(|ui| self.handler_ctx_menu(ui, i));
             });
+        }
+
+        // Say so, rather than showing an empty panel that reads as "your handlers are gone".
+        if shown == 0 && !needle.is_empty() {
+            ui.add_space(8.0);
+            ui.weak(format!("No game matches \"{}\"", self.handler_filter));
         }
     }
 

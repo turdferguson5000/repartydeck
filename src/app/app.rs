@@ -49,6 +49,9 @@ pub struct PartyApp {
     pub remembered_layout: Vec<crate::layout::SlotLayout>,
 
     pub handlers: Vec<Handler>,
+    /// Search text for the game list. Filters on the displayed name only; the real index is
+    /// kept, since selected_handler indexes handlers directly.
+    pub handler_filter: String,
     pub selected_handler: usize,
     pub handler_edit: Option<Handler>,
     pub handler_lite: Option<Handler>,
@@ -123,6 +126,7 @@ impl PartyApp {
             remembered_layout: Vec::new(),
             instance_add_dev: None,
             handlers,
+            handler_filter: String::new(),
             selected_handler: 0,
             handler_edit: None,
             handler_lite,
