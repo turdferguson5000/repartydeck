@@ -15,23 +15,30 @@ multi monitor placement, and enough logging to debug four sandboxed games at onc
 
 ### Nucleus handler compatibility
 
-This is the big one, and it is most of the reason the project exists.
+Done in v0.9.1, at least the import half. There is a button in the game list that reads a
+`.nc` file and turns it into a PartyDeck handler.
 
-Nucleus has somewhere around 600 handlers that people have already worked out and tested. They
-are `.nc` files, which are just zip archives holding a `handler.js` plus any emulator DLLs the
-game needs. RePartyDeck uses its own `handler.json` format.
+Measured against all 594 handlers published on hub.splitscreen.me:
 
-The plan:
+| | |
+|---|---|
+| Imported without error | 594 of 594 |
+| Got a working executable path | 593 (99%) |
+| Got a Steam appid | 562 (94%) |
+| Got a pause between starts | 586 (98%) |
+| Scripted sections dropped | 635 |
+| Bundled DLLs dropped | 396 |
 
-1. Read `.nc` files directly and pull out the fields that map cleanly. `Game.ExecutableName`,
-   `Game.MaxPlayers`, `Game.PauseBetweenStarts` and whether an emulator is bundled all
-   translate more or less directly.
-2. Report honestly on the parts that do not translate. Nucleus handlers are JavaScript and can
-   do arbitrary work, so a chunk of them will never convert automatically. Better to import
-   what works and say clearly what needs a human than to produce something that silently fails
-   halfway through a game night.
-3. Keep the imported handler editable afterwards, since the last 10 percent is usually one
-   wrong executable path.
+The last two rows are the honest part. 96% of handlers also define JavaScript functions,
+usually `Game.Play`, and Nucleus runs those in a JS engine on Windows while hooking the
+running game. PartyDeck does neither, so none of that comes across. What you get is the
+tedious, error prone part filled in correctly: which executable actually starts the game,
+the appid, the launch arguments, and how long to wait between instances. Every import
+writes what it dropped into the handler's info text, so it is visible in the app rather
+than something you find out when the game misbehaves.
+
+Still to do here: pull the emulator DLLs across where there is a Linux equivalent, and
+work out which of the scripted sections are simple enough to translate rather than drop.
 
 ### Handler search
 

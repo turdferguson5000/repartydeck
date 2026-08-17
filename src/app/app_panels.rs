@@ -122,11 +122,25 @@ impl PartyApp {
                     self.handler_edit = Some(Handler::default());
                     self.cur_page = MenuPage::EditHandler;
                 }
-                if ui.button("⬇").clicked() {
+                if ui.button("⬇").on_hover_text("Import a PartyDeck handler (.pd2)").clicked() {
                     if let Err(e) = import_pd2() {
                         msg("Error", &format!("Error importing PD2: {}", e));
                     } else {
                         self.handlers = scan_handlers();
+                    }
+                }
+                if ui
+                    .button("🅝")
+                    .on_hover_text("Import a Nucleus Co-op handler (.nc) from hub.splitscreen.me")
+                    .clicked()
+                {
+                    match crate::nucleus::import_nc_dialog() {
+                        Ok(Some(summary)) => {
+                            self.handlers = scan_handlers();
+                            msg("Imported from Nucleus", &summary);
+                        }
+                        Ok(None) => {}
+                        Err(e) => msg("Error", &format!("Could not import that handler: {e}")),
                     }
                 }
                 if ui.button("🔄").clicked() {

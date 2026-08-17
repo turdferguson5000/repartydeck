@@ -70,6 +70,23 @@ This is where most of the work went.
 * The physical keyboard still works while a pad is mapped. That sounds obvious but it is easy to
   break, and you need it constantly for naming a LAN game, a character, or a save.
 
+### Nucleus handler import
+
+There is a button in the game list that reads a Nucleus Co-op `.nc` handler and converts it
+into a PartyDeck one. Nucleus has around 600 community written handlers, which is the main
+reason local co-op feels solved on Windows and not on Linux, and this is the start of getting
+at that work.
+
+Run against every handler published on hub.splitscreen.me, all 594 imported, 593 came out with
+a correct executable path and 562 with a Steam appid.
+
+It is not magic and the app says so. 96% of those handlers also contain JavaScript that Nucleus
+executes while hooking the running game, and none of that carries over, along with 396 bundled
+DLLs. What you get is the fiddly part done right, the executable (frequently not the one you
+would guess from the game folder), the appid, the launch arguments and the stagger between
+instances. Everything dropped is written into the handler's info text so you can see it in the
+app.
+
 ### Logging and diagnostics
 
 Debugging four sandboxed games at once with no output is miserable, so:

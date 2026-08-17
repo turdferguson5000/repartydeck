@@ -5,6 +5,7 @@ mod instance;
 mod launch;
 mod layout;
 mod monitor;
+mod nucleus;
 mod paths;
 mod profiles;
 mod util;
@@ -35,6 +36,40 @@ fn main() -> eframe::Result {
     }
 
     let args: Vec<String> = std::env::args().collect();
+
+    // --import-nc <file.nc> [--json]
+    //
+    // Converts a Nucleus Co-op handler and prints the result. A seam rather than a hidden
+    // feature: it makes the importer runnable over the whole published hub library at once,
+    // which is the only way to find out what fraction actually converts instead of guessing
+    // from a handful of samples.
+    if let Some(pos) = std::env::args().position(|a| a == "--import-nc") {
+        let argv: Vec<String> = std::env::args().collect();
+        let file = argv.get(pos + 1).cloned().unwrap_or_default();
+        match nucleus::import_nc(std::path::Path::new(&file)) {
+            Ok((h, rep)) => {
+                if argv.iter().any(|a| a == "--json") {
+                    println!("{}", serde_json::to_string(&h).unwrap_or_default());
+                } else {
+                    println!("name       {}", h.name);
+                    println!("exec       {}", h.exec);
+                    println!("runtime    {}", h.runtime);
+                    println!("args       {}", h.args);
+                    println!("goldberg   {}", h.use_goldberg);
+                    println!("appid      {:?}", h.steam_appid);
+                    println!("pause      {:?}", h.pause_between_starts);
+                    println!("dropped    {} function(s), {} dll(s)",
+                             rep.functions.len(), rep.bundled_dlls.len());
+                }
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("import failed: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     // --dry-run-launch <handler-dir> <pad1[,pad2...]>
     //
     // A testable seam for the whole launch pipeline. It builds the REAL commands - handler
