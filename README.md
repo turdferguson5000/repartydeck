@@ -91,6 +91,23 @@ would guess from the game folder), the appid, the launch arguments and the stagg
 instances. Everything dropped is written into the handler's info text so you can see it in the
 app.
 
+### Look and feel
+
+* The game page leads with cover art rather than a 16 pixel icon, with the facts about the
+  game next to it: player count, Proton or native, whether Steam is being emulated, whether
+  pads are being mapped to keyboard and mouse, and a link to the Steam page.
+* Artwork comes from Steam, using the appid. Imports fetch it automatically, and there is a
+  "Get artwork from Steam" option in a game's right click menu for handlers that already
+  exist or were written by hand.
+* Player count is a real field now instead of a sentence buried in the info text, so it can
+  be shown before you start assigning controllers, and edited in the handler editor.
+* A search box above the game list, which is what makes a library of a few hundred imported
+  handlers usable.
+
+Cover art is deliberately only drawn on the game page, not as a thumbnail on every row of
+the list. The list builds a row per handler, and several hundred decoded 460x215 textures
+costs hundreds of megabytes for thumbnails nobody is looking at.
+
 ### Logging and diagnostics
 
 Debugging four sandboxed games at once with no output is miserable, so:

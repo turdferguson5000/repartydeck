@@ -291,6 +291,29 @@ impl PartyApp {
             self.cur_page = MenuPage::EditHandler;
         }
 
+        // Existing handlers predate the artwork, and hand written ones never had any. Steam
+        // has a header image for anything with an appid, which is where imported handlers get
+        // theirs, so offer the same to everything else.
+        if ui.button("Get artwork from Steam").clicked() {
+            match self.handlers[i].steam_appid {
+                None => msg(
+                    "No Steam appid",
+                    "This handler has no Steam appid, so there is nothing to look up. Set one \
+                     by editing the handler.",
+                ),
+                Some(appid) => {
+                    let dir = self.handlers[i].path_handler.clone();
+                    match crate::nucleus::fetch_steam_art(appid, &dir) {
+                        Ok(()) => {
+                            self.handlers = scan_handlers();
+                            msg("Artwork", "Fetched cover art from Steam.");
+                        }
+                        Err(e) => msg("Artwork", &format!("Could not fetch artwork: {e}")),
+                    }
+                }
+            }
+        }
+
         if ui.button("Open Folder").clicked() {
             if let Err(_) = std::process::Command::new("xdg-open")
                 .arg(self.handlers[i].path_handler.clone())

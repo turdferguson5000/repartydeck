@@ -335,6 +335,10 @@ pub fn to_handler(fields: &BTreeMap<String, JsValue>, report: &mut ImportReport)
             .unwrap_or(false);
 
     h.steam_appid = get("Game.SteamID").and_then(|v| v.as_f64()).map(|f| f as u32);
+    h.max_players = get("Game.MaxPlayers")
+        .and_then(|v| v.as_f64())
+        .filter(|n| *n >= 1.0 && *n <= 64.0)
+        .map(|n| n as u32);
 
     h
 }

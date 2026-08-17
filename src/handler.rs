@@ -56,6 +56,12 @@ pub struct Handler {
     #[serde(default)]
     pub pad_keymap: String,
     pub steam_appid: Option<u32>,
+    /// How many players the game supports, when it is known. Nucleus handlers state this and
+    /// it is genuinely useful to see before setting up, so it is kept rather than being
+    /// flattened into the info text. Optional because a hand written handler has no reason to
+    /// know it, and every existing handler.json predates the field.
+    #[serde(default)]
+    pub max_players: Option<u32>,
 
     pub game_null_paths: Vec<String>,
 }
@@ -86,6 +92,7 @@ impl Default for Handler {
             enable_hidraw: false,
             pad_keymap: String::new(),
             steam_appid: None,
+            max_players: None,
 
             game_null_paths: Vec::new(),
         }
@@ -166,6 +173,18 @@ impl Handler {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default()
+    }
+
+    /// The image to represent this game with, if there is one.
+    ///
+    /// Prefers a Steam header, since that is the one image guaranteed to be actual cover art
+    /// rather than a screenshot somebody dropped in the folder.
+    pub fn cover(&self) -> Option<PathBuf> {
+        let header = self.path_handler.join("imgs/header.jpg");
+        if header.exists() {
+            return Some(header);
+        }
+        self.img_paths.first().cloned()
     }
 
     fn get_imgs(&self) -> Vec<PathBuf> {

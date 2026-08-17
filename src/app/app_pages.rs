@@ -263,6 +263,30 @@ impl PartyApp {
             ui.checkbox(&mut h.enable_hidraw, "Enable HIDraw for non-Xbox controllers (fixes Unity Input System games; may cause double input in non-Unity games!)");
         }
 
+        // How many players the game supports. Shown on the game page so you know what you are
+        // setting up before you start assigning pads. 0 means unknown and displays nothing.
+        ui.horizontal(|ui| {
+            let mut players = h.max_players.unwrap_or(0);
+            ui.label("Max players:");
+            if ui
+                .add(
+                    egui::DragValue::new(&mut players)
+                        .range(0..=64)
+                        .speed(0.2)
+                        .custom_formatter(|n, _| match n as u32 {
+                            0 => "unknown".to_string(),
+                            v => v.to_string(),
+                        }),
+                )
+                .changed()
+            {
+                h.max_players = match players {
+                    0 => None,
+                    v => Some(v),
+                };
+            }
+        });
+
         // Gamepad -> keyboard/mouse translation. Off unless the game genuinely has no
         // controller support: turning it on for a game that does means the pad is grabbed
         // away and re-emitted as a mouse, which is strictly worse than what the game already
@@ -337,9 +361,72 @@ impl PartyApp {
     }
 
     pub fn display_page_game(&mut self, ui: &mut Ui) {
+        // Header: cover art on the left, title and the facts about this game on the right.
+        //
+        // The art is only drawn here, not in the game list. The list builds a row for every
+        // handler, and a library imported from Nucleus can be several hundred, so putting a
+        // decoded 460x215 texture on each one costs hundreds of megabytes for thumbnails
+        // nobody is looking at.
+        let cover = cur_handler!(self).cover();
         ui.horizontal(|ui| {
-            ui.image(cur_handler!(self).icon());
-            ui.heading(cur_handler!(self).display());
+            if let Some(path) = &cover {
+                ui.add(
+                    egui::Image::new(format!("file://{}", path.display()))
+                        .fit_to_exact_size(egui::vec2(230.0, 107.0))
+                        .maintain_aspect_ratio(true)
+                        .corner_radius(4),
+                );
+            } else {
+                ui.add(egui::Image::new(cur_handler!(self).icon()).max_width(48.0));
+            }
+
+            ui.vertical(|ui| {
+                ui.heading(cur_handler!(self).display());
+                let h = cur_handler!(self);
+
+                // A row of small facts, each only shown when it is actually known. Half of
+                // these were previously buried in the handler's JSON or in prose.
+                ui.horizontal_wrapped(|ui| {
+                    if let Some(n) = h.max_players {
+                        ui.label(RichText::new(format!("👥 up to {n} players")).small());
+                        ui.add(egui::Separator::default().vertical());
+                    }
+                    ui.label(RichText::new(match h.win() {
+                        true => " Proton",
+                        false => "🐧 Native",
+                    }).small());
+                    if h.use_goldberg {
+                        ui.add(egui::Separator::default().vertical());
+                        ui.label(RichText::new("🅢 Steam emulated").small())
+                            .on_hover_text("Goldberg stands in for the Steam client so several copies can run at once");
+                    }
+                    if !h.pad_keymap.is_empty() {
+                        ui.add(egui::Separator::default().vertical());
+                        ui.label(RichText::new("🎮→⌨ pad mapped").small()).on_hover_text(
+                            format!("This game has no controller support, so pads are translated to keyboard and mouse using the \"{}\" profile", h.pad_keymap),
+                        );
+                    }
+                    if h.enable_hidraw {
+                        ui.add(egui::Separator::default().vertical());
+                        ui.label(RichText::new("hidraw").small());
+                    }
+                });
+
+                ui.horizontal_wrapped(|ui| {
+                    if !h.author.is_empty() {
+                        ui.label(RichText::new(format!("by {}", h.author)).small().weak());
+                    }
+                    if !h.version.is_empty() {
+                        ui.label(RichText::new(format!("v{}", h.version)).small().weak());
+                    }
+                    if let Some(appid) = h.steam_appid {
+                        ui.hyperlink_to(
+                            RichText::new(format!("appid {appid}")).small(),
+                            format!("https://store.steampowered.com/app/{appid}"),
+                        );
+                    }
+                });
+            });
         });
 
         ui.separator();
@@ -389,20 +476,8 @@ impl PartyApp {
                 }
             }
 
-            ui.add(egui::Separator::default().vertical());
-            if h.win() {
-                ui.label(" Proton");
-            } else {
-                ui.label("🐧 Native");
-            }
-            if !h.author.is_empty() {
-                ui.add(egui::Separator::default().vertical());
-                ui.label(format!("Author: {}", h.author));
-            }
-            if !h.version.is_empty() {
-                ui.add(egui::Separator::default().vertical());
-                ui.label(format!("Version: {}", h.version));
-            }
+            // Runtime, author and version live in the header beside the cover art now,
+            // so this row is just the action.
         });
 
         egui::ScrollArea::horizontal()
