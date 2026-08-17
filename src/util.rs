@@ -6,8 +6,8 @@ use crate::paths::{PATH_HOME, PATH_PARTY};
 /// check is the place where that actually hurts: our version numbering restarted at 0.0.1,
 /// so checking upstream's releases would report an update on every launch and send people to
 /// a different project's download page.
-pub const REPO_SLUG: &str = "REPO_OWNER_PLACEHOLDER/repartydeck";
-pub const REPO_URL: &str = "https://github.com/REPO_OWNER_PLACEHOLDER/repartydeck";
+pub const REPO_SLUG: &str = "turdferguson5000/repartydeck";
+pub const REPO_URL: &str = "https://github.com/turdferguson5000/repartydeck";
 
 use dialog::{Choice, DialogBox};
 use rfd::FileDialog;
