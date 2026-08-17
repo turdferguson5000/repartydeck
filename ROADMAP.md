@@ -6,7 +6,7 @@ you do not need to understand anything underneath.
 
 Nothing here has a date on it. This is a spare time project.
 
-## v0.0.1 (now)
+## v0.9.0 (now)
 
 Everything in the "What is different" section of the README. Mostly controller reliability,
 multi monitor placement, and enough logging to debug four sandboxed games at once.

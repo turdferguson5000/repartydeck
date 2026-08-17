@@ -96,6 +96,16 @@ See [ROADMAP.md](ROADMAP.md). Short version: importing Nucleus handlers from spl
 a search tool for finding a game's handler, better artwork, and full controller navigation of
 the UI itself.
 
+## Versioning
+
+Version numbers carry on from where PartyDeck is, rather than restarting. Upstream was at
+v0.8.3 when this fork split off, so this is v0.9.0. The bump to 0.9 rather than 0.8.4 is
+because controller handling changed in ways that are not backwards compatible: every pad now
+goes through a mirror device, and the sandbox switched from blocking devices to allowing them.
+
+Config and handlers are compatible in both directions though, so you can go back to upstream
+without losing anything.
+
 ## Building
 
 ```sh
