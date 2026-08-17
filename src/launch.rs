@@ -268,16 +268,71 @@ fn js_siblings(evdev_path: &str) -> Vec<String> {
         .collect()
 }
 
+/// Start a per-player pad helper and take the device node it created.
+///
+/// Both helpers honour the same contract: print the /dev/input node on the FIRST stdout line,
+/// then keep running to pump events. Everything here is about not trusting that line - it is
+/// fed straight into gamescope and into the sandbox, and a bad value does not degrade the
+/// feature, it stops the game launching at all. That is not hypothetical: an early version
+/// printed a log message first, and every instance died before the game started.
+///
+/// Returns None (and kills the helper) if anything is off, so the launch continues without it.
+/// A helper left alive on a failed path is worse than none: it keeps its exclusive grab and the
+/// next session cannot even see a button press to assign that controller.
+fn spawn_pad_helper(
+    bin: &Path,
+    argv: &[&str],
+    i: usize,
+    what: &str,
+) -> Option<(String, std::process::Child)> {
+    let mut child = Command::new(bin)
+        .args(argv)
+        .stdout(std::process::Stdio::piped())
+        // Inheriting stderr would keep the parent's pipe open after we exit, so a caller
+        // reading our output waits for EOF that never comes.
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| dlog(&format!("{what}: failed to start for instance {i}: {e}")))
+        .ok()?;
+
+    let node = child
+        .stdout
+        .take()
+        .and_then(|so| {
+            use std::io::{BufRead, BufReader};
+            BufReader::new(so).lines().next().and_then(|l| l.ok())
+        })
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let looks_like_node = node.starts_with("/dev/input/event")
+        && node.len() > "/dev/input/event".len()
+        && node["/dev/input/event".len()..].chars().all(|c| c.is_ascii_digit());
+    // It must also exist and be openable right now, not merely look like a path.
+    let usable =
+        looks_like_node && std::fs::OpenOptions::new().read(true).open(&node).is_ok();
+
+    if !usable {
+        dlog(&format!(
+            "{what}: node {node:?} unusable for instance {i}; launching without it"
+        ));
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    Some((node, child))
+}
+
 fn sweep_orphan_pad_keymaps() {
-    let out = Command::new("pkill")
+    for pat in ["/pad-keymap\\.py", "/pad-mirror\\.py"] {
         // Leading slash matters: a bare "pad-keymap.py" pattern also matches
         // test-pad-keymap.py (and any shell whose command line mentions it), which is
         // how an earlier version killed the test harness and its own caller.
-        .args(["-f", "/pad-keymap\\.py"])
-        .status();
-    if let Ok(st) = out {
-        if st.success() {
-            println!("[partydeck] pad-keymap: cleared orphaned mapper(s) from a previous run");
+        if let Ok(st) = Command::new("pkill").args(["-f", pat]).status() {
+            if st.success() {
+                println!("[partydeck] cleared orphaned {pat} helper(s) from a previous run");
+            }
         }
     }
 }
@@ -316,8 +371,34 @@ pub fn launch_cmds(
                       inst.profname, inst.monitor, inst.width, inst.height, inst.devices));
     }
 
+    // Every player's pad is handed to a helper that owns it and presents PartyDeck a device of
+    // its own. Which helper depends on the handler:
+    //
+    //   pad-keymap.py  - the game has NO controller support, so the pad is translated into
+    //                    keyboard and mouse events (Torchlight II, Neverwinter).
+    //   pad-mirror.py  - the game handles controllers itself, so the pad is re-emitted
+    //                    verbatim. This buys nothing in features and everything in lifetime:
+    //                    see below.
+    //
+    // WHY EVEN A GAME WITH PERFECT PAD SUPPORT NEEDS THE MIRROR.
+    //
+    // The sandbox whitelists /dev/input, which freezes each instance's view of the world at
+    // launch. A wireless pad that powers itself off mid-session (xpad runs auto_poweroff=Y, and
+    // these pads have their own idle timeout) comes back as a BRAND NEW kernel input device -
+    // same eventN name, same minor, different device - and nothing can tell the running sandbox
+    // about it. That player is then done for the session.
+    //
+    // It is not a rare corner. Measured on 2026-08-16 in a four-player Orcs Must Die! 3 session:
+    // the two pads that power-cycled ten minutes after launch (event29 -> input264 and
+    // event30 -> input265) were exactly the two that stopped working, and the one pad that
+    // never power-cycled kept working. The whitelist did not cause this - before it, the same
+    // event produced the *opposite* symptom, a reconnected pad driving every instance at once.
+    //
+    // The mirror node is created by PartyDeck and held open for the whole session, so it
+    // outlives any number of pad power-cycles and the game never notices.
     let mut keymap_nodes: Vec<String> = Vec::new();
-    if !h.pad_keymap.is_empty() {
+    let mut mirror_nodes: Vec<String> = Vec::new();
+    {
         sweep_orphan_pad_keymaps();
         for (i, instance) in instances.iter().enumerate() {
             let pad = instance
@@ -325,76 +406,43 @@ pub fn launch_cmds(
                 .iter()
                 .map(|&d| &input_devices[d])
                 .find(|d| d.device_type == DeviceType::Gamepad);
-            // IMPORTANT: this Vec is indexed by instance, so every instance must push
-            // exactly one entry. An empty string means "no mapping for this player" - pushing
-            // only on success would shift later players' devices onto earlier players.
+            // IMPORTANT: both Vecs are indexed by instance, so every instance must push
+            // exactly one entry to each. An empty string means "nothing for this player" -
+            // pushing only on success would shift later players' devices onto earlier players.
             let Some(pad) = pad else {
                 keymap_nodes.push(String::new());
+                mirror_nodes.push(String::new());
                 continue;
             };
-            let out = Command::new(&*BIN_PAD_KEYMAP)
-                .args([
-                    "--device", &pad.path,
-                    "--profile", &h.pad_keymap,
-                    "--index", &(i + 1).to_string(),
-                    "--print-node",
-                ])
-                .stdout(std::process::Stdio::piped())
-                // Inheriting stderr would keep the parent's pipe open after we exit, so a
-                // caller reading our output waits for EOF that never comes.
-                .stderr(std::process::Stdio::null())
-                .spawn();
-            match out {
-                Ok(mut child) => {
-                    // The script prints the node it created on its first stdout line, then
-                    // keeps running to pump events. Read just that line.
-                    let node = child
-                        .stdout
-                        .take()
-                        .and_then(|so| {
-                            use std::io::{BufRead, BufReader};
-                            BufReader::new(so).lines().next().and_then(|l| l.ok())
-                        })
-                        .unwrap_or_default()
-                        .trim()
-                        .to_string();
-                    // Validate before trusting it. This line is fed straight to gamescope's
-                    // --libinput-hold-dev, so anything that is not a device path takes the
-                    // instance down before the game starts - which is exactly what happened
-                    // when the script's first stdout line was a log message.
-                    let looks_like_node = node.starts_with("/dev/input/event")
-                        && node["/dev/input/event".len()..].chars().all(|c| c.is_ascii_digit())
-                        && node.len() > "/dev/input/event".len();
-                    // The node must also EXIST and be openable right now. gamescope treats a
-                    // missing --libinput-hold-dev path as fatal ("Failed to create libinput
-                    // device"), so a stale path here does not degrade the feature - it stops
-                    // the game launching entirely. This translation is a convenience; it must
-                    // never be able to block a launch.
-                    let usable = looks_like_node
-                        && std::fs::OpenOptions::new().read(true).open(&node).is_ok();
-                    if !usable {
-                        println!(
-                            "[partydeck] pad-keymap: node {node:?} unusable for instance {i}, \
-                             launching without controller mapping"
-                        );
-                        // Kill it, or it keeps its exclusive grab on the pad and the NEXT
-                        // session cannot assign that controller at all.
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        keymap_nodes.push(String::new());
-                    } else {
-                        dlog(&format!("pad-keymap: instance {i} -> {node} (exists={})",
-                                      std::path::Path::new(&node).exists()));
-                        keymap_nodes.push(node);
-                        if let Ok(mut kids) = KEYMAP_CHILDREN.lock() {
-                            kids.push(child);
-                        }
+            let translate = !h.pad_keymap.is_empty();
+            let (bin, what): (&Path, &str) = if translate {
+                (&BIN_PAD_KEYMAP, "pad-keymap")
+            } else {
+                (&BIN_PAD_MIRROR, "pad-mirror")
+            };
+            let index = (i + 1).to_string();
+            let mut argv: Vec<&str> = vec!["--device", &pad.path, "--index", &index];
+            if translate {
+                argv.extend(["--profile", &h.pad_keymap]);
+            }
+            argv.push("--print-node");
+
+            let node = match spawn_pad_helper(bin, &argv, i, what) {
+                Some((node, child)) => {
+                    dlog(&format!("{what}: instance {i} pad {} -> {node}", pad.path));
+                    if let Ok(mut kids) = KEYMAP_CHILDREN.lock() {
+                        kids.push(child);
                     }
+                    node
                 }
-                Err(e) => {
-                    println!("[partydeck] pad-keymap failed to start: {e}");
-                    keymap_nodes.push(String::new());
-                }
+                None => String::new(),
+            };
+            if translate {
+                keymap_nodes.push(node);
+                mirror_nodes.push(String::new());
+            } else {
+                mirror_nodes.push(node);
+                keymap_nodes.push(String::new());
             }
         }
     }
@@ -640,10 +688,18 @@ pub fn launch_cmds(
         // --libinput-hold-dev devices before bwrap started. This governs what the GAME sees.
         cmd.args(["--tmpfs", "/dev/input"]);
 
+        let mirror = mirror_nodes.get(i).filter(|n| !n.is_empty());
         let mut allow: Vec<String> = Vec::new();
         for &d in &instance.devices {
             if let Some(dev) = input_devices.get(d) {
                 if !dev.enabled {
+                    continue;
+                }
+                // A mirrored pad is deliberately NOT bound. Binding it would pin the sandbox to
+                // the physical node, which is the thing that dies when the pad powers off - and
+                // the helper holds an exclusive grab on it anyway, so the game would find a
+                // controller that never sends anything.
+                if mirror.is_some() && dev.device_type == DeviceType::Gamepad {
                     continue;
                 }
                 allow.push(dev.path.clone());
@@ -656,6 +712,12 @@ pub fn launch_cmds(
         // This player's translated pad device, if the handler uses one.
         if let Some(node) = keymap_nodes.get(i).filter(|n| !n.is_empty()) {
             allow.push(node.clone());
+        }
+        // ...or their mirrored pad, plus its own jsN - joydev creates one for a uinput gamepad
+        // exactly as it does for a real one, and titles that use the legacy API need it.
+        if let Some(node) = mirror {
+            allow.push(node.clone());
+            allow.extend(js_siblings(node));
         }
 
         for path in &allow {
@@ -685,6 +747,11 @@ pub fn launch_cmds(
         for (n, node) in keymap_nodes.iter().enumerate() {
             if n != i && !node.is_empty() {
                 dlog(&format!("    deny  {node} (player {n} keymap device)"));
+            }
+        }
+        for (n, node) in mirror_nodes.iter().enumerate() {
+            if n != i && !node.is_empty() {
+                dlog(&format!("    deny  {node} (player {n} mirrored pad)"));
             }
         }
 

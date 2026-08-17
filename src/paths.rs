@@ -58,3 +58,10 @@ pub static BIN_GSC_KBM: LazyLock<PathBuf> = LazyLock::new(|| {
 pub static BIN_PAD_KEYMAP: LazyLock<PathBuf> = LazyLock::new(|| {
     PATH_RES.join("pad-keymap.py")
 });
+
+/// pad-mirror.py: re-emits a pad verbatim on a node PartyDeck owns, for games that already
+/// have controller support. The point is that the node OUTLIVES the pad - see the comment on
+/// the mirror in launch.rs.
+pub static BIN_PAD_MIRROR: LazyLock<PathBuf> = LazyLock::new(|| {
+    PATH_RES.join("pad-mirror.py")
+});
