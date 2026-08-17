@@ -80,6 +80,10 @@ at that work.
 Run against every handler published on hub.splitscreen.me, all 594 imported, 593 came out with
 a correct executable path and 562 with a Steam appid.
 
+You can select as many `.nc` files as you like in one go, so importing a whole library is one
+dialog rather than 600. Where a handler carries a Steam appid, the game's header image is
+pulled from Steam so the entry has real cover art instead of a generic icon.
+
 It is not magic and the app says so. 96% of those handlers also contain JavaScript that Nucleus
 executes while hooking the running game, and none of that carries over, along with 396 bundled
 DLLs. What you get is the fiddly part done right, the executable (frequently not the one you

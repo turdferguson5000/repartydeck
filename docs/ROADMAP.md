@@ -37,6 +37,11 @@ the appid, the launch arguments, and how long to wait between instances. Every i
 writes what it dropped into the handler's info text, so it is visible in the app rather
 than something you find out when the game misbehaves.
 
+Multi-select import landed too, so a whole library is one dialog rather than 600, and
+handlers with a Steam appid get the game's header image pulled from Steam for cover art.
+Bundled art was checked first and turned out to be a dead end: only 11 of the 594 contain
+images at all, and those are game assets rather than artwork.
+
 Still to do here: pull the emulator DLLs across where there is a Linux equivalent, and
 work out which of the scripted sections are simple enough to translate rather than drop.
 

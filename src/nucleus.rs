@@ -395,49 +395,150 @@ pub fn info_text(fields: &BTreeMap<String, JsValue>, report: &ImportReport) -> S
 /// shows in a dialog. The dropped parts are the whole point of the summary: an import that
 /// quietly looks complete is worse than one that tells you it is half a handler.
 pub fn import_nc_dialog() -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let Some(file) = rfd::FileDialog::new()
-        .set_title("Select a Nucleus Co-op handler")
+    // pick_fileS, plural, on purpose. The whole point of this feature is the ~600 handlers
+    // published on the hub, and importing them one dialog at a time would be absurd. Select
+    // one or select all of them.
+    let Some(files) = rfd::FileDialog::new()
+        .set_title("Select Nucleus Co-op handlers")
         .set_directory(&*crate::paths::PATH_HOME)
         .add_filter("Nucleus Co-op Handler", &["nc"])
-        .pick_file()
+        .pick_files()
     else {
         return Ok(None);
     };
 
-    let (mut h, report) = import_nc(&file)?;
-    if h.name.trim().is_empty() {
-        return Err("Handler has no game name".into());
+    let mut imported: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    let mut no_exec = 0usize;
+    let (mut funcs, mut dlls, mut art) = (0usize, 0usize, 0usize);
+
+    for file in &files {
+        let label = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
+        match import_one(file) {
+            Ok(Some((name, rep, exec_missing, got_art))) => {
+                imported.push(name);
+                funcs += rep.functions.len();
+                dlls += rep.bundled_dlls.len();
+                if exec_missing {
+                    no_exec += 1;
+                }
+                if got_art {
+                    art += 1;
+                }
+            }
+            Ok(None) => skipped.push(label),
+            Err(e) => failed.push(format!("{label}: {e}")),
+        }
     }
 
-    // Directory name has to survive being a path: game names carry ':' and '/' freely.
+    if imported.is_empty() && failed.is_empty() && !skipped.is_empty() {
+        return Err(format!(
+            "Already imported ({} handler(s) skipped, they exist here already)",
+            skipped.len()
+        )
+        .into());
+    }
+
+    let mut out = format!("Imported {} of {} handler(s).\n", imported.len(), files.len());
+    if imported.len() <= 6 {
+        for n in &imported {
+            out.push_str(&format!("  {n}\n"));
+        }
+    }
+    if !skipped.is_empty() {
+        out.push_str(&format!("\nSkipped {} that already existed.\n", skipped.len()));
+    }
+    if !failed.is_empty() {
+        out.push_str(&format!("\nFailed {}:\n", failed.len()));
+        for f in failed.iter().take(5) {
+            out.push_str(&format!("  {f}\n"));
+        }
+    }
+    if art > 0 {
+        out.push_str(&format!("\nFetched cover art for {art}.\n"));
+    }
+    out.push_str(&format!(
+        "\nNot converted: {funcs} scripted section(s) and {dlls} bundled DLL(s) across all of \
+         them. Each handler's info text lists its own.\n"
+    ));
+    if no_exec > 0 {
+        out.push_str(&format!(
+            "\n{no_exec} had no executable named in the handler, so you will have to set that \
+             yourself.\n"
+        ));
+    }
+    out.push_str("\nEvery import still needs its game directory pointed at your copy.");
+    Ok(Some(out))
+}
+
+/// Import a single `.nc`. `Ok(None)` means it was already installed.
+///
+/// Returns whether the executable was missing and whether cover art was fetched, so the batch
+/// summary can report both without reopening anything.
+fn import_one(
+    file: &Path,
+) -> Result<Option<(String, ImportReport, bool, bool)>, Box<dyn std::error::Error>> {
+    let (mut h, report) = import_nc(file)?;
+    if h.name.trim().is_empty() {
+        return Err("handler has no game name".into());
+    }
+
+    // The directory name has to survive being a path, and game names carry ':' and '/' freely.
     let safe: String = h
         .name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    let dir = crate::paths::PATH_PARTY.join("handlers").join(safe.trim_matches('_'));
+    let dir = crate::paths::PATH_PARTY
+        .join("handlers")
+        .join(safe.trim_matches('_'));
     if dir.exists() {
-        return Err(format!("A handler already exists at {}", dir.display()).into());
+        return Ok(None);
     }
     std::fs::create_dir_all(&dir)?;
     h.path_handler = dir.clone();
+    let exec_missing = h.exec.is_empty();
+    let appid = h.steam_appid;
     h.save_to_json()?;
 
-    Ok(Some(format!(
-        "Imported \"{}\".\n\nExecutable: {}\nSteam appid: {}\nGoldberg: {}\n\n\
-         Not converted: {} scripted section(s), {} bundled DLL(s).\n\n\
-         Set the game directory before launching, and read the handler's info text for what \
-         was dropped.",
-        h.name,
-        match h.exec.is_empty() {
-            true => "NOT FOUND - set this yourself".to_string(),
-            false => h.exec.clone(),
-        },
-        h.steam_appid.map(|a| a.to_string()).unwrap_or("none".into()),
-        h.use_goldberg,
-        report.functions.len(),
-        report.bundled_dlls.len(),
-    )))
+    let got_art = appid.map(|a| fetch_steam_art(a, &dir).is_ok()).unwrap_or(false);
+    Ok(Some((h.name.clone(), report, exec_missing, got_art)))
+}
+
+/// Fetch a game's Steam header image into the handler's `imgs/` folder.
+///
+/// Nucleus handlers are not a source of cover art. Only 11 of the 594 published ones contain
+/// images at all, and those are game assets rather than artwork. Steam is, and an appid was
+/// recovered for 94% of imports, so the art comes from there instead.
+///
+/// Failure is not an error worth surfacing. No network, no appid on Steam, or a game that
+/// simply has no header image just means the handler shows the default icon.
+pub fn fetch_steam_art(appid: u32, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let url =
+        format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg");
+    let resp = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?
+        .get(&url)
+        .header("User-Agent", "repartydeck")
+        .send()?;
+    if !resp.status().is_success() {
+        return Err(format!("steam returned {}", resp.status()).into());
+    }
+    let bytes = resp.bytes()?;
+    // Guard against an error page being written out as if it were a picture.
+    if bytes.len() < 1024 || !bytes.starts_with(&[0xFF, 0xD8]) {
+        return Err("not a JPEG".into());
+    }
+    let imgs = dir.join("imgs");
+    std::fs::create_dir_all(&imgs)?;
+    std::fs::write(imgs.join("header.jpg"), &bytes)?;
+    Ok(())
 }
 
 /// Read a `.nc` archive and produce a handler plus a report of what was lost.

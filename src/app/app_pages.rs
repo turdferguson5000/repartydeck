@@ -263,6 +263,49 @@ impl PartyApp {
             ui.checkbox(&mut h.enable_hidraw, "Enable HIDraw for non-Xbox controllers (fixes Unity Input System games; may cause double input in non-Unity games!)");
         }
 
+        // Gamepad -> keyboard/mouse translation. Off unless the game genuinely has no
+        // controller support: turning it on for a game that does means the pad is grabbed
+        // away and re-emitted as a mouse, which is strictly worse than what the game already
+        // does by itself.
+        ui.horizontal(|ui| {
+            let mut mapping_on = !h.pad_keymap.is_empty();
+            if ui
+                .checkbox(&mut mapping_on, "Map controller to keyboard/mouse")
+                .on_hover_text(
+                    "For games with NO controller support at all, like Torchlight II or \
+                     Neverwinter Nights. Each player's pad is turned into a virtual keyboard \
+                     and mouse. Leave this off if the game reads gamepads itself.",
+                )
+                .changed()
+            {
+                h.pad_keymap = match mapping_on {
+                    true => "generic".to_string(),
+                    false => String::new(),
+                };
+            }
+            if mapping_on {
+                // Kept in step with PROFILES in res/pad-keymap.py. The field is a plain
+                // string, so a profile added to the script can still be used by typing it,
+                // rather than needing a rebuild of the app.
+                egui::ComboBox::from_id_salt("pad_keymap_profile")
+                    .selected_text(match h.pad_keymap.as_str() {
+                        "" => "generic",
+                        other => other,
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut h.pad_keymap, "generic".into(), "Generic (both sticks are a pointer)");
+                        ui.selectable_value(&mut h.pad_keymap, "torchlight2".into(), "Torchlight II (click to move ARPG)");
+                        ui.selectable_value(&mut h.pad_keymap, "nwn".into(), "Neverwinter Nights");
+                    });
+                ui.add(
+                    egui::TextEdit::singleline(&mut h.pad_keymap)
+                        .desired_width(90.0)
+                        .hint_text("profile"),
+                )
+                .on_hover_text("Profile name, as defined in res/pad-keymap.py");
+            }
+        });
+
         if !h.win() {
             ui.horizontal(|ui| {
                 ui.label("Linux Runtime:");
