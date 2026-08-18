@@ -62,6 +62,14 @@ pub struct Handler {
     /// know it, and every existing handler.json predates the field.
     #[serde(default)]
     pub max_players: Option<u32>,
+    /// Steam DLC this game should be told it owns, as `appid=Name` entries.
+    ///
+    /// Games that gate content on an entitlement check ask the Steam client whether a DLC is
+    /// owned. Under emulation the answer is no unless it is declared, so expansions stay
+    /// locked even when the files are installed, which is exactly what happened with Orcs
+    /// Must Die! 3. Written into gbe_fork's configs.app.ini at launch.
+    #[serde(default)]
+    pub dlc: Vec<String>,
 
     pub game_null_paths: Vec<String>,
 }
@@ -93,6 +101,7 @@ impl Default for Handler {
             pad_keymap: String::new(),
             steam_appid: None,
             max_players: None,
+            dlc: Vec::new(),
 
             game_null_paths: Vec::new(),
         }

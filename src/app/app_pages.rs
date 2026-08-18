@@ -263,6 +263,38 @@ impl PartyApp {
             ui.checkbox(&mut h.enable_hidraw, "Enable HIDraw for non-Xbox controllers (fixes Unity Input System games; may cause double input in non-Unity games!)");
         }
 
+        // Steam DLC to declare as owned. One `appid=Name` per line, which is the shape both
+        // gbe_fork and the Nucleus handlers use, so entries can be pasted between them.
+        if h.use_goldberg {
+            ui.collapsing(format!("Steam DLC ({} declared)", h.dlc.len()), |ui| {
+                ui.label(
+                    RichText::new(
+                        "Games that lock content behind an ownership check will keep it locked \
+                         under Steam emulation unless the DLC is listed here, even when you own \
+                         it and the files are installed. One entry per line, appid=Name.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                let mut text = h.dlc.join("\n");
+                if ui
+                    .add(
+                        egui::TextEdit::multiline(&mut text)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("1781510=Orcs Must Die! 3 - Cold as Eyes Expansion"),
+                    )
+                    .changed()
+                {
+                    h.dlc = text
+                        .lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                }
+            });
+        }
+
         // How many players the game supports. Shown on the game page so you know what you are
         // setting up before you start assigning pads. 0 means unknown and displays nothing.
         ui.horizontal(|ui| {

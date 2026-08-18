@@ -289,6 +289,44 @@ fn node_for_slot(key: &str) -> Option<String> {
     found.into_iter().next()
 }
 
+/// Tell the emulated Steam client which DLC this game owns.
+///
+/// Games that gate content on an entitlement check ask Steam whether a DLC is owned, and under
+/// emulation the answer is no unless it is declared. The content is usually already on disk,
+/// since unlock-only DLC ships inside the base depot, so the expansion is present and simply
+/// refuses to appear. That is what happened with Orcs Must Die! 3.
+///
+/// gbe_fork reads `steam_settings/configs.app.ini` under GseAppPath. Note this is NOT the
+/// format Nucleus uses: Nucleus handlers write `steam_settings/DLC.txt`, and the string
+/// "DLC.txt" appears nowhere in the bundled steamclient, so copying that file across does
+/// nothing.
+///
+/// GseAppPath is one shared directory for every game, so the file is rewritten per launch
+/// rather than merged. Steam appids are unique and a game only asks about its own, but leaving
+/// another game's entries lying around invites confusion for no benefit.
+fn write_goldberg_dlc(h: &Handler) {
+    let dir = PATH_PARTY.join("goldberg_data").join("steam_settings");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let mut out = String::from(
+        "; Written by PartyDeck at launch. Edit the handler's DLC list, not this file.\n\n\
+         [app::dlcs]\nunlock_all=1\n",
+    );
+    for entry in &h.dlc {
+        let entry = entry.trim();
+        if !entry.is_empty() {
+            out.push_str(entry);
+            out.push('\n');
+        }
+    }
+    if let Err(e) = std::fs::write(dir.join("configs.app.ini"), out) {
+        dlog(&format!("could not write goldberg DLC config: {e}"));
+    } else {
+        dlog(&format!("goldberg: declared {} DLC entry(s)", h.dlc.len()));
+    }
+}
+
 /// Legacy /dev/input/jsN nodes belonging to the same physical device as an evdev node.
 fn js_siblings(evdev_path: &str) -> Vec<String> {
     let name = std::path::Path::new(evdev_path)
@@ -906,6 +944,7 @@ pub fn launch_cmds(
         }
 
         if h.use_goldberg {
+            write_goldberg_dlc(h);
             cmd.env("GseAppPath", PATH_PARTY.join("goldberg_data"));
             cmd.env("GseSavePath", path_prof.join("steam"));
             cmd.env("SteamAppUser", instance.profname.clone());

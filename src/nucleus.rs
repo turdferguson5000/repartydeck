@@ -71,6 +71,7 @@ impl JsValue {
 /// What an import could not bring across.
 #[derive(Debug, Default)]
 pub struct ImportReport {
+    pub dlc_count: usize,
     pub functions: Vec<String>,
     pub bundled_dlls: Vec<String>,
     pub other_files: Vec<String>,
@@ -286,6 +287,45 @@ fn to_unix_path(s: &str) -> String {
         .to_string()
 }
 
+/// Pull a DLC list out of a handler script.
+///
+/// This is a deliberate exception to the rule that function bodies are ignored. Nucleus
+/// handlers declare DLC by writing a file from inside `Game.Play`:
+///
+/// ```js
+/// var dlc = SW + "\\steam_settings\\DLC.txt";
+/// var lines = ["1781510=Orcs Must Die! 3 - Cold as Eyes Expansion", ...];
+/// Context.WriteTextFile(dlc, lines);
+/// ```
+///
+/// so a parser that only reads top-level assignments misses it entirely, and the expansions
+/// stay locked in a game the player owns. 49 of the 594 published handlers do this.
+///
+/// It is a heuristic, not a parse: if the script mentions DLC.txt at all, every string
+/// literal shaped like `appid=name` is taken. That is safe because the shape is distinctive
+/// and a spurious entry only declares a DLC the game will never ask about.
+fn extract_dlc(src: &str) -> Vec<String> {
+    if !src.to_ascii_lowercase().contains("dlc.txt") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for raw in src.split('"') {
+        let Some((id, name)) = raw.split_once('=') else {
+            continue;
+        };
+        if name.trim().is_empty() || name.len() > 120 {
+            continue;
+        }
+        if id.len() >= 5 && id.len() <= 8 && id.chars().all(|c| c.is_ascii_digit()) {
+            let entry = format!("{id}={}", name.trim());
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+    }
+    out
+}
+
 /// Convert a parsed handler into a PartyDeck one.
 pub fn to_handler(fields: &BTreeMap<String, JsValue>, report: &mut ImportReport) -> Handler {
     let get = |k: &str| fields.get(k);
@@ -388,6 +428,13 @@ pub fn info_text(fields: &BTreeMap<String, JsValue>, report: &ImportReport) -> S
     }
     for w in &report.warnings {
         out.push_str(&format!("\nWARNING: {w}\n"));
+    }
+    if report.dlc_count > 0 {
+        out.push_str(&format!(
+            "\n{} DLC entr(ies) were declared, so expansions you own should be visible. They \
+             are listed in the handler's dlc field.\n",
+            report.dlc_count
+        ));
     }
     out.push_str("\nYou still need to point path_gameroot at your copy of the game.");
     out
@@ -581,6 +628,8 @@ pub fn import_nc(path: &Path) -> Result<(Handler, ImportReport), Box<dyn std::er
         .collect();
 
     let mut h = to_handler(&fields, &mut report);
+    h.dlc = extract_dlc(&js_src);
+    report.dlc_count = h.dlc.len();
     h.info = info_text(&fields, &report);
     Ok((h, report))
 }
